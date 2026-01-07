@@ -1,0 +1,13 @@
+{
+  "dateFormat": "YYYY-MM-DD HH:mm:ss",
+  "showSeconds": true,
+  "startTimeKey": "startTime",
+  "endTimeKey": "endTime",
+  "entriesKey": "lapseEntries",
+  "totalTimeKey": "totalTimeTracked",
+  "projectKey": "project",
+  "defaultLabelType": "frontmatter",
+  "defaultLabelText": "",
+  "defaultLabelFrontmatterKey": "project",
+  "timeAdjustMinutes": 5
+}

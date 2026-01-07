@@ -1,0 +1,398 @@
+/* Lapse Container Styles */
+
+.lapse-container {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 12px;
+    margin: 8px 0;
+    background: var(--background-primary);
+}
+
+/* Action Bar */
+
+.lapse-action-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.lapse-timer-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.lapse-timer-display {
+    font-size: 18px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+    min-width: 80px;
+    text-align: center;
+    padding: 6px 0;
+    line-height: 1.5;
+}
+
+.lapse-adjust-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.lapse-btn-adjust {
+    padding: 4px 6px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--interactive-normal);
+    color: var(--text-normal);
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 24px;
+}
+
+.lapse-btn-adjust:hover:not(:disabled) {
+    background: var(--interactive-hover);
+}
+
+.lapse-btn-adjust:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.lapse-input-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.lapse-label-input {
+    width: 100%;
+    padding: 6px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.lapse-label-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+}
+
+.lapse-label-display {
+    width: 100%;
+    padding: 6px 12px;
+    color: var(--text-normal);
+    font-size: 13px;
+    font-family: inherit;
+    line-height: 1.5;
+}
+
+.lapse-label-display-running {
+    width: 100%;
+    padding: 6px 12px;
+    color: var(--text-normal);
+    font-size: 18px;
+    font-weight: 700;
+    font-family: inherit;
+    line-height: 1.5;
+}
+
+.lapse-summary {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 2px 0;
+}
+
+.lapse-summary-left {
+    text-align: left;
+}
+
+.lapse-summary-right {
+    text-align: right;
+}
+
+.lapse-btn-play-stop,
+.lapse-btn-chevron {
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--interactive-normal);
+    color: var(--text-normal);
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 32px;
+    align-self: flex-start;
+    margin-top: 0;
+}
+
+.lapse-btn-play-stop:hover,
+.lapse-btn-chevron:hover {
+    background: var(--interactive-hover);
+}
+
+.lapse-btn-play-stop {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border: none;
+}
+
+.lapse-btn-play-stop:hover {
+    opacity: 0.9;
+}
+
+/* Collapsible Panel */
+
+.lapse-panel {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.lapse-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+}
+
+.lapse-table thead {
+    background: var(--background-secondary);
+}
+
+.lapse-table th {
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-normal);
+    border-bottom: 2px solid var(--background-modifier-border);
+}
+
+.lapse-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.lapse-table tbody tr:hover {
+    background: var(--background-secondary);
+}
+
+.lapse-input {
+    width: 100%;
+    padding: 4px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.lapse-input:read-only {
+    background: transparent;
+    border: none;
+    padding: 4px 0;
+    cursor: default;
+}
+
+.lapse-input:not(:read-only) {
+    background: var(--background-secondary);
+    border-color: var(--interactive-accent);
+}
+
+.lapse-cell-actions {
+    white-space: nowrap;
+    width: 1%;
+}
+
+.lapse-btn-edit,
+.lapse-btn-delete {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    margin-right: 4px;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+}
+
+.lapse-btn-edit:hover,
+.lapse-btn-delete:hover {
+    color: var(--text-normal);
+}
+
+.lapse-btn-delete {
+    color: var(--text-error, #d32f2f);
+}
+
+.lapse-btn-delete:hover {
+    color: var(--text-error, #d32f2f);
+    opacity: 0.8;
+}
+
+.lapse-btn-add {
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--interactive-normal);
+    color: var(--text-normal);
+    cursor: pointer;
+    font-size: 12px;
+    margin-right: 4px;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 28px;
+}
+
+.lapse-btn-add:hover {
+    background: var(--interactive-hover);
+}
+
+.lapse-btn-add {
+    margin-top: 8px;
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border: none;
+    font-weight: 500;
+}
+
+.lapse-btn-add:hover {
+    opacity: 0.9;
+}
+
+/* Sidebar Styles */
+
+.lapse-sidebar-empty {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 16px;
+    text-align: center;
+}
+
+.lapse-sidebar-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin-top: 16px;
+    margin-bottom: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.lapse-sidebar-list {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0;
+}
+
+.lapse-sidebar-item {
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-size: 13px;
+    color: var(--text-normal);
+    line-height: 1.4;
+}
+
+.lapse-sidebar-note-group {
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-size: 13px;
+    color: var(--text-normal);
+    line-height: 1.4;
+}
+
+.lapse-sidebar-top-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.lapse-sidebar-item a.internal-link,
+.lapse-sidebar-note-group a.internal-link {
+    color: var(--link-color, var(--text-accent));
+    text-decoration: none;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.lapse-sidebar-item a.internal-link:hover,
+.lapse-sidebar-note-group a.internal-link:hover {
+    text-decoration: underline;
+}
+
+.lapse-sidebar-time {
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+    margin-left: 8px;
+}
+
+.lapse-sidebar-second-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+}
+
+.lapse-sidebar-project {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.lapse-sidebar-label {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.lapse-sidebar-entries-list {
+    margin-top: 4px;
+    padding-left: 12px;
+}
+
+.lapse-sidebar-entry-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    line-height: 1.4;
+}
+
+.lapse-sidebar-entry-label {
+    flex: 1;
+}
+
+.lapse-sidebar-entry-time {
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    margin-left: 8px;
+}
