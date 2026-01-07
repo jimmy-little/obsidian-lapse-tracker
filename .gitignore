@@ -6,8 +6,8 @@ npm-debug.log*
 node_modules/
 
 # Build output
-main.js
 *.js.map
+# Note: main.js is committed so BRAT can install directly from the repo
 
 # macOS
 .DS_Store
