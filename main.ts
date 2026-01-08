@@ -11,6 +11,9 @@ interface LapseSettings {
 	defaultLabelType: 'freeText' | 'frontmatter' | 'fileName';
 	defaultLabelText: string;
 	defaultLabelFrontmatterKey: string;
+	removeTimestampFromFileName: boolean;
+	defaultTagOnNote: string;
+	defaultTagOnTimeEntries: string;
 	timeAdjustMinutes: number;
 }
 
@@ -25,6 +28,9 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	defaultLabelType: 'freeText',
 	defaultLabelText: '',
 	defaultLabelFrontmatterKey: 'project',
+	removeTimestampFromFileName: false,
+	defaultTagOnNote: '#lapse',
+	defaultTagOnTimeEntries: '',
 	timeAdjustMinutes: 5
 }
 
@@ -35,6 +41,7 @@ interface TimeEntry {
 	endTime: number | null;
 	duration: number;
 	isPaused: boolean;
+	tags: string[];
 }
 
 interface PageTimeData {
@@ -60,6 +67,12 @@ export default class LapsePlugin extends Plugin {
 			(leaf) => new LapseSidebarView(leaf, this)
 		);
 
+		// Register the reports view
+		this.registerView(
+			'lapse-reports',
+			(leaf) => new LapseReportsView(leaf, this)
+		);
+
 		// Add ribbon icon to show active timers
 		this.addRibbonIcon('clock', 'Lapse: Show Active Timers', () => {
 			this.activateView();
@@ -80,6 +93,15 @@ export default class LapsePlugin extends Plugin {
 			name: 'Show active timers',
 			callback: () => {
 				this.activateView();
+			}
+		});
+
+		// Add command to show reports view
+		this.addCommand({
+			id: 'show-lapse-reports',
+			name: 'Show time reports',
+			callback: () => {
+				this.activateReportsView();
 			}
 		});
 
@@ -130,7 +152,8 @@ export default class LapsePlugin extends Plugin {
 								startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
 								endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
 								duration: (currentEntry.duration || 0) * 1000,
-								isPaused: false
+								isPaused: false,
+								tags: currentEntry.tags || []
 							});
 							currentEntry = null;
 						}
@@ -148,7 +171,8 @@ export default class LapsePlugin extends Plugin {
 								startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
 								endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
 								duration: (currentEntry.duration || 0) * 1000,
-								isPaused: false
+								isPaused: false,
+								tags: currentEntry.tags || []
 							});
 						}
 						currentEntry = {};
@@ -163,6 +187,20 @@ export default class LapsePlugin extends Plugin {
 					} else if (trimmed.startsWith('duration:') && currentEntry) {
 						const durationStr = trimmed.replace(/duration:\s*/, '').trim();
 						currentEntry.duration = parseInt(durationStr) || 0;
+					} else if (trimmed.startsWith('tags:') && currentEntry) {
+						// Parse tags - can be array or comma-separated
+						const tagsStr = trimmed.replace(/tags:\s*/, '').trim();
+						if (tagsStr.startsWith('[')) {
+							// Array format: tags: [tag1, tag2]
+							try {
+								currentEntry.tags = JSON.parse(tagsStr);
+							} catch {
+								currentEntry.tags = [];
+							}
+						} else {
+							// Comma-separated or single tag
+							currentEntry.tags = tagsStr.split(',').map(t => t.trim()).filter(t => t);
+						}
 					}
 				}
 			}
@@ -175,7 +213,8 @@ export default class LapsePlugin extends Plugin {
 					startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
 					endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
 					duration: (currentEntry.duration || 0) * 1000,
-					isPaused: false
+					isPaused: false,
+					tags: currentEntry.tags || []
 				});
 			}
 
@@ -192,6 +231,73 @@ export default class LapsePlugin extends Plugin {
 			pageData.totalTimeTracked = entries.reduce((sum, e) => sum + e.duration, 0);
 		} catch (error) {
 			console.error('Error loading entries from frontmatter:', error);
+		}
+	}
+
+	getDefaultTags(): string[] {
+		const defaultTag = this.settings.defaultTagOnTimeEntries.trim();
+		if (defaultTag) {
+			// Remove # if present, we'll add it when displaying
+			const tag = defaultTag.startsWith('#') ? defaultTag.substring(1) : defaultTag;
+			return [tag];
+		}
+		return [];
+	}
+
+	async addDefaultTagToNote(filePath: string): Promise<void> {
+		const defaultTag = this.settings.defaultTagOnNote.trim();
+		if (!defaultTag) {
+			return;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (!file || !(file instanceof TFile)) {
+			return;
+		}
+
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+			const match = content.match(frontmatterRegex);
+
+			// Normalize tag (remove # if present, we'll add it in frontmatter)
+			const tagName = defaultTag.startsWith('#') ? defaultTag.substring(1) : defaultTag;
+
+			if (match) {
+				// Check if tag already exists in frontmatter
+				const frontmatter = match[1];
+				if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
+					// Tags already exist, check if our tag is there
+					const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]]+)\]?/);
+					if (tagsMatch) {
+						const existingTags = tagsMatch[1].split(',').map(t => t.trim().replace(/['"#]/g, ''));
+						if (existingTags.includes(tagName)) {
+							return; // Tag already exists
+						}
+					}
+					// Add tag to existing tags
+					const newContent = content.replace(
+						/(tags?:\s*\[?)([^\]]+)(\]?)/,
+						(match, prefix, tags, suffix) => {
+							const tagList = tags.split(',').map((t: string) => t.trim()).filter((t: string) => t);
+							tagList.push(tagName);
+							return `${prefix}${tagList.map((t: string) => `"${t}"`).join(', ')}${suffix}`;
+						}
+					);
+					await this.app.vault.modify(file, newContent);
+				} else {
+					// Add tags field to frontmatter
+					const newFrontmatter = frontmatter + `\ntags: ["${tagName}"]`;
+					const newContent = content.replace(frontmatterRegex, `---\n${newFrontmatter}\n---`);
+					await this.app.vault.modify(file, newContent);
+				}
+			} else {
+				// No frontmatter, create it with tag
+				const newContent = `---\ntags: ["${tagName}"]\n---\n\n${content}`;
+				await this.app.vault.modify(file, newContent);
+			}
+		} catch (error) {
+			console.error('Error adding tag to note:', error);
 		}
 	}
 
@@ -256,12 +362,55 @@ export default class LapsePlugin extends Plugin {
 		} else if (settings.defaultLabelType === 'fileName') {
 			const file = this.app.vault.getAbstractFileByPath(filePath);
 			if (file && file instanceof TFile) {
-				return file.basename || 'Untitled timer';
+				let fileName = file.basename || 'Untitled timer';
+				if (settings.removeTimestampFromFileName) {
+					fileName = this.removeTimestampFromFileName(fileName);
+				}
+				return fileName;
 			}
 			return 'Untitled timer';
 		}
 		
 		return 'Untitled timer';
+	}
+
+	removeTimestampFromFileName(fileName: string): string {
+		// Remove various timestamp patterns from filename
+		// Patterns to match:
+		// - ISO: 2024-01-07T18:30:00, 2024-01-07T18:30:00Z, 2024-01-07T18:30:00.000Z
+		// - Obsidian: 2024-01-07, 20240107
+		// - Dataview: 2024-01-07, 2024/01/07
+		// - YYYYMMDD-HHMMSS: 20240107-183000, 20240107-1830
+		// - Other: 2024-01-07 18:30, 2024-01-07_18:30, etc.
+		
+		let result = fileName;
+		
+		// Pattern 1: YYYYMMDD-HHMMSS or YYYYMMDD-HHMM (at start or after separator)
+		result = result.replace(/(?:^|[-_\s])(\d{8})-(\d{4,6})(?:[-_\s]|$)/g, '');
+		
+		// Pattern 2: ISO format with T separator: YYYY-MM-DDTHH:MM:SS or variations
+		result = result.replace(/(?:^|[-_\s])(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?(?:\.\d{3})?)(?:Z|[-+]\d{2}:\d{2})?(?:[-_\s]|$)/gi, '');
+		
+		// Pattern 3: Date with time: YYYY-MM-DD HH:MM or YYYY-MM-DD_HH:MM
+		result = result.replace(/(?:^|[-_\s])(\d{4}-\d{2}-\d{2})[-_\s](\d{2}:\d{2}(?::\d{2})?)(?:[-_\s]|$)/g, '');
+		
+		// Pattern 4: Date only: YYYY-MM-DD or YYYY/MM/DD or YYYYMMDD (at start or after separator)
+		result = result.replace(/(?:^|[-_\s])(\d{4}[-/]?\d{2}[-/]?\d{2})(?:[-_\s]|$)/g, '');
+		
+		// Pattern 5: Time only: HH:MM:SS or HH:MM (standalone or after separator)
+		result = result.replace(/(?:^|[-_\s])(\d{2}:\d{2}(?::\d{2})?)(?:[-_\s]|$)/g, '');
+		
+		// Clean up multiple consecutive separators
+		result = result.replace(/[-_\s]{2,}/g, ' ');
+		
+		// Clean up leading/trailing separators
+		result = result.replace(/^[-_\s]+|[-_\s]+$/g, '');
+		
+		// Trim whitespace
+		result = result.trim();
+		
+		// If result is empty after removing timestamp, return original
+		return result || fileName;
 	}
 
 	async getProjectFromFrontmatter(filePath: string): Promise<string | null> {
@@ -392,10 +541,12 @@ export default class LapsePlugin extends Plugin {
 		// Summary line under input
 		const summaryLine = inputContainer.createDiv({ cls: 'lapse-summary' });
 		const summaryLeft = summaryLine.createDiv({ cls: 'lapse-summary-left' });
+		const summaryRight = summaryLine.createDiv({ cls: 'lapse-summary-right' });
+		const todayLabel = summaryRight.createDiv({ cls: 'lapse-today-label' });
 
-		// Buttons container with "Today" label below
+		// Buttons container
 		const buttonsContainer = actionBar.createDiv({ cls: 'lapse-buttons-container' });
-
+		
 		// Play/Stop button
 		const playStopBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-play-stop' });
 		if (activeTimer) {
@@ -407,9 +558,6 @@ export default class LapsePlugin extends Plugin {
 		// Chevron button to toggle panel
 		const chevronBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-chevron' });
 		setIcon(chevronBtn, 'chevron-down');
-		
-		// Today label under buttons
-		const todayLabel = buttonsContainer.createDiv({ cls: 'lapse-today-label' });
 
 		// Helper function to calculate total time (including active timer if running)
 		const calculateTotalTime = (): number => {
@@ -595,7 +743,8 @@ export default class LapsePlugin extends Plugin {
 					startTime: Date.now(),
 					endTime: null,
 					duration: 0,
-					isPaused: false
+					isPaused: false,
+					tags: this.getDefaultTags()
 				};
 				pageData.entries.push(newEntry);
 
@@ -604,24 +753,32 @@ export default class LapsePlugin extends Plugin {
 					updateInterval = window.setInterval(updateDisplays, 1000);
 				}
 
+				// Add default tag to note if configured
+				await this.addDefaultTagToNote(filePath);
+
 				// Update frontmatter
 				await this.updateFrontmatter(filePath);
 
 				// Update UI - convert input to display when timer starts
+				// Use the actual label value (from input or default) not just input.value
 				if (labelInput) {
-					const labelText = labelInput.value;
 					labelInput.remove();
 					labelDisplay = inputContainer.createEl('div', {
-						text: labelText,
+						text: label, // Use the resolved label value
 						cls: 'lapse-label-display-running'
 					});
 					labelInput = null;
 				} else if (labelDisplay) {
 					// Update existing display - replace with new element with correct class
-					const labelText = labelDisplay.textContent || label;
 					labelDisplay.remove();
 					labelDisplay = inputContainer.createEl('div', {
-						text: labelText,
+						text: label, // Use the resolved label value
+						cls: 'lapse-label-display-running'
+					});
+				} else {
+					// Create display if it doesn't exist
+					labelDisplay = inputContainer.createEl('div', {
+						text: label,
 						cls: 'lapse-label-display-running'
 					});
 				}
@@ -645,7 +802,8 @@ export default class LapsePlugin extends Plugin {
 				startTime: null,
 				endTime: null,
 				duration: 0,
-				isPaused: false
+				isPaused: false,
+				tags: this.getDefaultTags()
 			};
 			pageData.entries.push(newEntry);
 			await this.updateFrontmatter(filePath);
@@ -687,11 +845,21 @@ export default class LapsePlugin extends Plugin {
 					hour: 'numeric', minute: '2-digit'
 				})
 				: '--';
-			const durationText = this.formatTimeAsHHMMSS(entry.duration);
-
 			detailsLine.createSpan({ text: `Start: ${startText}`, cls: 'lapse-card-detail' });
 			detailsLine.createSpan({ text: `End: ${endText}`, cls: 'lapse-card-detail' });
-			detailsLine.createSpan({ text: `Duration: ${durationText}`, cls: 'lapse-card-detail' });
+
+			// Third line: duration and tags on same line
+			const bottomLine = card.createDiv({ cls: 'lapse-card-bottom-line' });
+			const durationText = this.formatTimeAsHHMMSS(entry.duration);
+			bottomLine.createSpan({ text: `Duration: ${durationText}`, cls: 'lapse-card-detail' });
+
+			// Tags on the same line
+			if (entry.tags && entry.tags.length > 0) {
+				const tagsContainer = bottomLine.createDiv({ cls: 'lapse-card-tags-inline' });
+				entry.tags.forEach(tag => {
+					const tagEl = tagsContainer.createSpan({ text: `#${tag}`, cls: 'lapse-card-tag' });
+				});
+			}
 
 			// Edit button handler - opens modal
 			editBtn.onclick = async () => {
@@ -771,6 +939,16 @@ export default class LapsePlugin extends Plugin {
 		}) as HTMLInputElement;
 		durationInput.readOnly = true;
 
+		// Tags input
+		const tagsContainer = content.createDiv({ cls: 'lapse-modal-field' });
+		tagsContainer.createEl('label', { text: 'Tags (comma-separated, without #)', attr: { for: 'lapse-edit-tags' } });
+		const tagsInput = tagsContainer.createEl('input', {
+			type: 'text',
+			value: (entry.tags || []).join(', '),
+			cls: 'lapse-modal-input',
+			attr: { id: 'lapse-edit-tags', placeholder: 'tag1, tag2, tag3' }
+		}) as HTMLInputElement;
+
 		// Buttons
 		const buttonContainer = content.createDiv({ cls: 'lapse-modal-buttons' });
 		const saveBtn = buttonContainer.createEl('button', { text: 'Save', cls: 'mod-cta' });
@@ -808,6 +986,18 @@ export default class LapsePlugin extends Plugin {
 				entry.endTime = new Date(endInput.value).getTime();
 			} else {
 				entry.endTime = null;
+			}
+
+			// Parse tags (remove # if present, split by comma)
+			const tagsStr = tagsInput.value.trim();
+			if (tagsStr) {
+				entry.tags = tagsStr.split(',').map(t => {
+					t = t.trim();
+					// Remove # if present
+					return t.startsWith('#') ? t.substring(1) : t;
+				}).filter(t => t);
+			} else {
+				entry.tags = [];
 			}
 
 			// Calculate duration from start and end times
@@ -916,7 +1106,8 @@ export default class LapsePlugin extends Plugin {
 			label: entry.label,
 			start: entry.startTime ? new Date(entry.startTime).toISOString() : null,
 			end: entry.endTime ? new Date(entry.endTime).toISOString() : null,
-			duration: Math.floor(entry.duration / 1000)
+			duration: Math.floor(entry.duration / 1000),
+			tags: entry.tags || []
 		}));
 
 		// Calculate totalTimeTracked (sum of all completed entry durations)
@@ -994,6 +1185,9 @@ export default class LapsePlugin extends Plugin {
 						filteredLines.push(`    end: ${entry.end}`);
 					}
 					filteredLines.push(`    duration: ${entry.duration}`);
+					if (entry.tags && entry.tags.length > 0) {
+						filteredLines.push(`    tags: [${entry.tags.map((t: string) => `"${t}"`).join(', ')}]`);
+					}
 				});
 			} else {
 				filteredLines.push(`${entriesKey}: []`);
@@ -1029,6 +1223,9 @@ export default class LapsePlugin extends Plugin {
 						frontmatterLines.push(`    end: ${entry.end}`);
 					}
 					frontmatterLines.push(`    duration: ${entry.duration}`);
+					if (entry.tags && entry.tags.length > 0) {
+						frontmatterLines.push(`    tags: [${entry.tags.map(t => `"${t}"`).join(', ')}]`);
+					}
 				});
 			} else {
 				frontmatterLines.push(`${entriesKey}: []`);
@@ -1054,6 +1251,24 @@ export default class LapsePlugin extends Plugin {
 		} else {
 			leaf = workspace.getRightLeaf(false);
 			await leaf?.setViewState({ type: 'lapse-sidebar', active: true });
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
+	}
+
+	async activateReportsView() {
+		const { workspace } = this.app;
+
+		let leaf: WorkspaceLeaf | null = null;
+		const leaves = workspace.getLeavesOfType('lapse-reports');
+
+		if (leaves.length > 0) {
+			leaf = leaves[0];
+		} else {
+			leaf = workspace.getRightLeaf(false);
+			await leaf?.setViewState({ type: 'lapse-reports', active: true });
 		}
 
 		if (leaf) {
@@ -1643,6 +1858,42 @@ class LapseSettingTab extends PluginSettingTab {
 					}));
 		}
 
+		if (this.plugin.settings.defaultLabelType === 'fileName') {
+			new Setting(containerEl)
+				.setName('Remove timestamp from filename')
+				.setDesc('When enabled, removes date and time stamps from filenames when setting the default label')
+				.addToggle(toggle => toggle
+					.setValue(this.plugin.settings.removeTimestampFromFileName)
+					.onChange(async (value) => {
+						this.plugin.settings.removeTimestampFromFileName = value;
+						await this.plugin.saveSettings();
+					}));
+		}
+
+		containerEl.createEl('h3', { text: 'Tags' });
+
+		new Setting(containerEl)
+			.setName('Default tag on note')
+			.setDesc('Tag to add to notes when time entries are created (e.g., #lapse)')
+			.addText(text => text
+				.setPlaceholder('#lapse')
+				.setValue(this.plugin.settings.defaultTagOnNote)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultTagOnNote = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Default tag on time entries')
+			.setDesc('Tag to automatically add to new time entries (leave empty for none, e.g., #work)')
+			.addText(text => text
+				.setPlaceholder('#work')
+				.setValue(this.plugin.settings.defaultTagOnTimeEntries)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultTagOnTimeEntries = value;
+					await this.plugin.saveSettings();
+				}));
+
 		containerEl.createEl('h3', { text: 'Timer Controls' });
 
 		new Setting(containerEl)
@@ -1656,5 +1907,274 @@ class LapseSettingTab extends PluginSettingTab {
 					this.plugin.settings.timeAdjustMinutes = numValue;
 					await this.plugin.saveSettings();
 				}));
+	}
+}
+
+class LapseReportsView extends ItemView {
+	plugin: LapsePlugin;
+	period: 'daily' | 'weekly' | 'monthly' = 'daily';
+	groupBy: 'note' | 'project' | 'date' = 'note';
+
+	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
+		super(leaf);
+		this.plugin = plugin;
+	}
+
+	getViewType(): string {
+		return 'lapse-reports';
+	}
+
+	getDisplayText(): string {
+		return 'Time Reports';
+	}
+
+	getIcon(): string {
+		return 'bar-chart-2';
+	}
+
+	async onOpen() {
+		await this.render();
+	}
+
+	async render() {
+		const container = this.containerEl.children[1];
+		container.empty();
+
+		// Header with period tabs
+		const header = container.createDiv({ cls: 'lapse-reports-header' });
+		
+		// Period tabs
+		const tabsContainer = header.createDiv({ cls: 'lapse-reports-tabs' });
+		const dailyTab = tabsContainer.createEl('button', { text: 'Daily', cls: 'lapse-reports-tab' });
+		const weeklyTab = tabsContainer.createEl('button', { text: 'Weekly', cls: 'lapse-reports-tab' });
+		const monthlyTab = tabsContainer.createEl('button', { text: 'Monthly', cls: 'lapse-reports-tab' });
+
+		// Update active tab
+		const updateTabs = () => {
+			[dailyTab, weeklyTab, monthlyTab].forEach(tab => tab.removeClass('is-active'));
+			if (this.period === 'daily') dailyTab.addClass('is-active');
+			if (this.period === 'weekly') weeklyTab.addClass('is-active');
+			if (this.period === 'monthly') monthlyTab.addClass('is-active');
+		};
+
+		dailyTab.onclick = async () => {
+			this.period = 'daily';
+			updateTabs();
+			await this.render();
+		};
+
+		weeklyTab.onclick = async () => {
+			this.period = 'weekly';
+			updateTabs();
+			await this.render();
+		};
+
+		monthlyTab.onclick = async () => {
+			this.period = 'monthly';
+			updateTabs();
+			await this.render();
+		};
+
+		updateTabs();
+
+		// Grouping dropdown
+		const controlsContainer = header.createDiv({ cls: 'lapse-reports-controls' });
+		const groupBySetting = controlsContainer.createDiv({ cls: 'lapse-reports-groupby' });
+		groupBySetting.createEl('label', { text: 'Group by: ' });
+		const groupBySelect = groupBySetting.createEl('select', { cls: 'lapse-reports-select' });
+		groupBySelect.createEl('option', { text: 'Note', value: 'note' });
+		groupBySelect.createEl('option', { text: 'Project', value: 'project' });
+		groupBySelect.createEl('option', { text: 'Date', value: 'date' });
+		groupBySelect.value = this.groupBy;
+		groupBySelect.onchange = async () => {
+			this.groupBy = groupBySelect.value as 'note' | 'project' | 'date';
+			await this.render();
+		};
+
+		// Get data for the selected period
+		const data = await this.getReportData();
+
+		// Summary section
+		const summary = container.createDiv({ cls: 'lapse-reports-summary' });
+		const totalTime = data.reduce((sum, item) => sum + item.totalTime, 0);
+		summary.createEl('h3', { text: `Total: ${this.plugin.formatTimeAsHHMMSS(totalTime)}` });
+
+		// Data table
+		const tableContainer = container.createDiv({ cls: 'lapse-reports-table-container' });
+		const table = tableContainer.createEl('table', { cls: 'lapse-reports-table' });
+		
+		const thead = table.createEl('thead');
+		const headerRow = thead.createEl('tr');
+		headerRow.createEl('th', { text: this.getGroupByLabel() });
+		headerRow.createEl('th', { text: 'Time' });
+		headerRow.createEl('th', { text: 'Entries' });
+
+		const tbody = table.createEl('tbody');
+		
+		// Sort by time descending
+		const sortedData = [...data].sort((a, b) => b.totalTime - a.totalTime);
+
+		for (const item of sortedData) {
+			const row = tbody.createEl('tr');
+			row.createEl('td', { text: item.group });
+			row.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(item.totalTime) });
+			row.createEl('td', { text: item.entryCount.toString() });
+		}
+
+		// Chart section
+		if (data.length > 0) {
+			const chartContainer = container.createDiv({ cls: 'lapse-reports-chart-container' });
+			await this.renderChart(chartContainer, data, totalTime);
+		}
+	}
+
+	getGroupByLabel(): string {
+		switch (this.groupBy) {
+			case 'note': return 'Note';
+			case 'project': return 'Project';
+			case 'date': return 'Date';
+			default: return 'Group';
+		}
+	}
+
+	async getReportData(): Promise<Array<{ group: string; totalTime: number; entryCount: number }>> {
+		// Calculate date range based on period
+		const now = new Date();
+		let startDate: Date;
+		let endDate: Date = new Date(now);
+
+		if (this.period === 'daily') {
+			startDate = new Date(now);
+			startDate.setHours(0, 0, 0, 0);
+		} else if (this.period === 'weekly') {
+			startDate = new Date(now);
+			const dayOfWeek = startDate.getDay();
+			startDate.setDate(startDate.getDate() - dayOfWeek);
+			startDate.setHours(0, 0, 0, 0);
+		} else { // monthly
+			startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			startDate.setHours(0, 0, 0, 0);
+		}
+
+		const startTime = startDate.getTime();
+		const endTime = endDate.getTime();
+
+		// Collect all entries in the date range
+		const entries: Array<{ filePath: string; entry: TimeEntry; project: string | null }> = [];
+
+		// Check all markdown files
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+		
+		for (const file of markdownFiles) {
+			const filePath = file.path;
+			
+			// Load entries from frontmatter if not in memory
+			if (!this.plugin.timeData.has(filePath)) {
+				await this.plugin.loadEntriesFromFrontmatter(filePath);
+			}
+
+			const pageData = this.plugin.timeData.get(filePath);
+			if (pageData) {
+				const project = await this.plugin.getProjectFromFrontmatter(filePath);
+				
+				for (const entry of pageData.entries) {
+					if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+						// Only include completed entries or active timers
+						if (entry.endTime || (entry.startTime && !entry.endTime)) {
+							entries.push({ filePath, entry, project });
+						}
+					}
+				}
+			}
+		}
+
+		// Group entries
+		const grouped = new Map<string, { totalTime: number; entryCount: number }>();
+
+		for (const { filePath, entry, project } of entries) {
+			let groupKey: string;
+
+			if (this.groupBy === 'note') {
+				const file = this.app.vault.getAbstractFileByPath(filePath);
+				groupKey = file && file instanceof TFile ? file.basename : filePath;
+			} else if (this.groupBy === 'project') {
+				groupKey = project || 'No Project';
+			} else { // date
+				const date = new Date(entry.startTime!);
+				if (this.period === 'daily') {
+					groupKey = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+				} else if (this.period === 'weekly') {
+					const weekStart = new Date(date);
+					weekStart.setDate(date.getDate() - date.getDay());
+					groupKey = `Week of ${weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+				} else {
+					groupKey = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+				}
+			}
+
+			const entryDuration = entry.endTime 
+				? entry.duration 
+				: entry.duration + (Date.now() - entry.startTime!);
+
+			if (!grouped.has(groupKey)) {
+				grouped.set(groupKey, { totalTime: 0, entryCount: 0 });
+			}
+
+			const group = grouped.get(groupKey)!;
+			group.totalTime += entryDuration;
+			group.entryCount += 1;
+		}
+
+		// Convert to array
+		return Array.from(grouped.entries()).map(([group, data]) => ({
+			group,
+			...data
+		}));
+	}
+
+	async renderChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number) {
+		container.empty();
+		container.createEl('h4', { text: 'Time Distribution' });
+
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.setAttribute('class', 'lapse-reports-chart');
+		svg.setAttribute('width', '400');
+		svg.setAttribute('height', '300');
+		svg.setAttribute('viewBox', '0 0 400 300');
+		container.appendChild(svg);
+
+		// Bar chart
+		const maxTime = Math.max(...data.map(d => d.totalTime));
+		const barWidth = 350 / data.length;
+		const maxBarHeight = 250;
+		const colors = [
+			'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
+			'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C'
+		];
+
+		data.forEach((item, index) => {
+			const barHeight = (item.totalTime / maxTime) * maxBarHeight;
+			const x = 25 + index * barWidth;
+			const y = 275 - barHeight;
+
+			const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+			rect.setAttribute('x', x.toString());
+			rect.setAttribute('y', y.toString());
+			rect.setAttribute('width', (barWidth - 2).toString());
+			rect.setAttribute('height', barHeight.toString());
+			rect.setAttribute('fill', colors[index % colors.length]);
+			rect.setAttribute('rx', '2');
+			svg.appendChild(rect);
+
+			// Label
+			const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+			text.setAttribute('x', (x + barWidth / 2).toString());
+			text.setAttribute('y', '290');
+			text.setAttribute('text-anchor', 'middle');
+			text.setAttribute('font-size', '10');
+			text.setAttribute('fill', 'var(--text-muted)');
+			text.textContent = item.group.length > 10 ? item.group.substring(0, 10) + '...' : item.group;
+			svg.appendChild(text);
+		});
 	}
 }

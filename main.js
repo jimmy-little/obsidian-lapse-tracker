@@ -39,6 +39,9 @@ var DEFAULT_SETTINGS = {
   defaultLabelType: "freeText",
   defaultLabelText: "",
   defaultLabelFrontmatterKey: "project",
+  removeTimestampFromFileName: false,
+  defaultTagOnNote: "#lapse",
+  defaultTagOnTimeEntries: "",
   timeAdjustMinutes: 5
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
@@ -53,6 +56,10 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     this.registerView(
       "lapse-sidebar",
       (leaf) => new LapseSidebarView(leaf, this)
+    );
+    this.registerView(
+      "lapse-reports",
+      (leaf) => new LapseReportsView(leaf, this)
     );
     this.addRibbonIcon("clock", "Lapse: Show Active Timers", () => {
       this.activateView();
@@ -69,6 +76,13 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       name: "Show active timers",
       callback: () => {
         this.activateView();
+      }
+    });
+    this.addCommand({
+      id: "show-lapse-reports",
+      name: "Show time reports",
+      callback: () => {
+        this.activateReportsView();
       }
     });
     this.addSettingTab(new LapseSettingTab(this.app, this));
@@ -107,7 +121,8 @@ var LapsePlugin = class extends import_obsidian.Plugin {
                 startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
                 endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
                 duration: (currentEntry.duration || 0) * 1e3,
-                isPaused: false
+                isPaused: false,
+                tags: currentEntry.tags || []
               });
               currentEntry = null;
             }
@@ -122,7 +137,8 @@ var LapsePlugin = class extends import_obsidian.Plugin {
                 startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
                 endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
                 duration: (currentEntry.duration || 0) * 1e3,
-                isPaused: false
+                isPaused: false,
+                tags: currentEntry.tags || []
               });
             }
             currentEntry = {};
@@ -136,6 +152,17 @@ var LapsePlugin = class extends import_obsidian.Plugin {
           } else if (trimmed.startsWith("duration:") && currentEntry) {
             const durationStr = trimmed.replace(/duration:\s*/, "").trim();
             currentEntry.duration = parseInt(durationStr) || 0;
+          } else if (trimmed.startsWith("tags:") && currentEntry) {
+            const tagsStr = trimmed.replace(/tags:\s*/, "").trim();
+            if (tagsStr.startsWith("[")) {
+              try {
+                currentEntry.tags = JSON.parse(tagsStr);
+              } catch (e) {
+                currentEntry.tags = [];
+              }
+            } else {
+              currentEntry.tags = tagsStr.split(",").map((t) => t.trim()).filter((t) => t);
+            }
           }
         }
       }
@@ -146,7 +173,8 @@ var LapsePlugin = class extends import_obsidian.Plugin {
           startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
           endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
           duration: (currentEntry.duration || 0) * 1e3,
-          isPaused: false
+          isPaused: false,
+          tags: currentEntry.tags || []
         });
       }
       if (!this.timeData.has(filePath)) {
@@ -160,6 +188,67 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       pageData.totalTimeTracked = entries.reduce((sum, e) => sum + e.duration, 0);
     } catch (error) {
       console.error("Error loading entries from frontmatter:", error);
+    }
+  }
+  getDefaultTags() {
+    const defaultTag = this.settings.defaultTagOnTimeEntries.trim();
+    if (defaultTag) {
+      const tag = defaultTag.startsWith("#") ? defaultTag.substring(1) : defaultTag;
+      return [tag];
+    }
+    return [];
+  }
+  async addDefaultTagToNote(filePath) {
+    const defaultTag = this.settings.defaultTagOnNote.trim();
+    if (!defaultTag) {
+      return;
+    }
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!file || !(file instanceof import_obsidian.TFile)) {
+      return;
+    }
+    try {
+      const content = await this.app.vault.read(file);
+      const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+      const match = content.match(frontmatterRegex);
+      const tagName = defaultTag.startsWith("#") ? defaultTag.substring(1) : defaultTag;
+      if (match) {
+        const frontmatter = match[1];
+        if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
+          const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]]+)\]?/);
+          if (tagsMatch) {
+            const existingTags = tagsMatch[1].split(",").map((t) => t.trim().replace(/['"#]/g, ""));
+            if (existingTags.includes(tagName)) {
+              return;
+            }
+          }
+          const newContent = content.replace(
+            /(tags?:\s*\[?)([^\]]+)(\]?)/,
+            (match2, prefix, tags, suffix) => {
+              const tagList = tags.split(",").map((t) => t.trim()).filter((t) => t);
+              tagList.push(tagName);
+              return `${prefix}${tagList.map((t) => `"${t}"`).join(", ")}${suffix}`;
+            }
+          );
+          await this.app.vault.modify(file, newContent);
+        } else {
+          const newFrontmatter = frontmatter + `
+tags: ["${tagName}"]`;
+          const newContent = content.replace(frontmatterRegex, `---
+${newFrontmatter}
+---`);
+          await this.app.vault.modify(file, newContent);
+        }
+      } else {
+        const newContent = `---
+tags: ["${tagName}"]
+---
+
+${content}`;
+        await this.app.vault.modify(file, newContent);
+      }
+    } catch (error) {
+      console.error("Error adding tag to note:", error);
     }
   }
   async getDefaultLabel(filePath) {
@@ -209,11 +298,27 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     } else if (settings.defaultLabelType === "fileName") {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (file && file instanceof import_obsidian.TFile) {
-        return file.basename || "Untitled timer";
+        let fileName = file.basename || "Untitled timer";
+        if (settings.removeTimestampFromFileName) {
+          fileName = this.removeTimestampFromFileName(fileName);
+        }
+        return fileName;
       }
       return "Untitled timer";
     }
     return "Untitled timer";
+  }
+  removeTimestampFromFileName(fileName) {
+    let result = fileName;
+    result = result.replace(/(?:^|[-_\s])(\d{8})-(\d{4,6})(?:[-_\s]|$)/g, "");
+    result = result.replace(/(?:^|[-_\s])(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2})?(?:\.\d{3})?)(?:Z|[-+]\d{2}:\d{2})?(?:[-_\s]|$)/gi, "");
+    result = result.replace(/(?:^|[-_\s])(\d{4}-\d{2}-\d{2})[-_\s](\d{2}:\d{2}(?::\d{2})?)(?:[-_\s]|$)/g, "");
+    result = result.replace(/(?:^|[-_\s])(\d{4}[-/]?\d{2}[-/]?\d{2})(?:[-_\s]|$)/g, "");
+    result = result.replace(/(?:^|[-_\s])(\d{2}:\d{2}(?::\d{2})?)(?:[-_\s]|$)/g, "");
+    result = result.replace(/[-_\s]{2,}/g, " ");
+    result = result.replace(/^[-_\s]+|[-_\s]+$/g, "");
+    result = result.trim();
+    return result || fileName;
   }
   async getProjectFromFrontmatter(filePath) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -298,6 +403,8 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     }
     const summaryLine = inputContainer.createDiv({ cls: "lapse-summary" });
     const summaryLeft = summaryLine.createDiv({ cls: "lapse-summary-left" });
+    const summaryRight = summaryLine.createDiv({ cls: "lapse-summary-right" });
+    const todayLabel = summaryRight.createDiv({ cls: "lapse-today-label" });
     const buttonsContainer = actionBar.createDiv({ cls: "lapse-buttons-container" });
     const playStopBtn = buttonsContainer.createEl("button", { cls: "lapse-btn-play-stop" });
     if (activeTimer) {
@@ -307,7 +414,6 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     }
     const chevronBtn = buttonsContainer.createEl("button", { cls: "lapse-btn-chevron" });
     (0, import_obsidian.setIcon)(chevronBtn, "chevron-down");
-    const todayLabel = buttonsContainer.createDiv({ cls: "lapse-today-label" });
     const calculateTotalTime = () => {
       return pageData.entries.reduce((sum, e) => {
         if (e.endTime !== null) {
@@ -439,26 +545,33 @@ var LapsePlugin = class extends import_obsidian.Plugin {
           startTime: Date.now(),
           endTime: null,
           duration: 0,
-          isPaused: false
+          isPaused: false,
+          tags: this.getDefaultTags()
         };
         pageData.entries.push(newEntry);
         if (!updateInterval) {
           updateInterval = window.setInterval(updateDisplays, 1e3);
         }
+        await this.addDefaultTagToNote(filePath);
         await this.updateFrontmatter(filePath);
         if (labelInput) {
-          const labelText = labelInput.value;
           labelInput.remove();
           labelDisplay = inputContainer.createEl("div", {
-            text: labelText,
+            text: label,
+            // Use the resolved label value
             cls: "lapse-label-display-running"
           });
           labelInput = null;
         } else if (labelDisplay) {
-          const labelText = labelDisplay.textContent || label;
           labelDisplay.remove();
           labelDisplay = inputContainer.createEl("div", {
-            text: labelText,
+            text: label,
+            // Use the resolved label value
+            cls: "lapse-label-display-running"
+          });
+        } else {
+          labelDisplay = inputContainer.createEl("div", {
+            text: label,
             cls: "lapse-label-display-running"
           });
         }
@@ -479,7 +592,8 @@ var LapsePlugin = class extends import_obsidian.Plugin {
         startTime: null,
         endTime: null,
         duration: 0,
-        isPaused: false
+        isPaused: false,
+        tags: this.getDefaultTags()
       };
       pageData.entries.push(newEntry);
       await this.updateFrontmatter(filePath);
@@ -513,10 +627,17 @@ var LapsePlugin = class extends import_obsidian.Plugin {
         hour: "numeric",
         minute: "2-digit"
       }) : "--";
-      const durationText = this.formatTimeAsHHMMSS(entry.duration);
       detailsLine.createSpan({ text: `Start: ${startText}`, cls: "lapse-card-detail" });
       detailsLine.createSpan({ text: `End: ${endText}`, cls: "lapse-card-detail" });
-      detailsLine.createSpan({ text: `Duration: ${durationText}`, cls: "lapse-card-detail" });
+      const bottomLine = card.createDiv({ cls: "lapse-card-bottom-line" });
+      const durationText = this.formatTimeAsHHMMSS(entry.duration);
+      bottomLine.createSpan({ text: `Duration: ${durationText}`, cls: "lapse-card-detail" });
+      if (entry.tags && entry.tags.length > 0) {
+        const tagsContainer = bottomLine.createDiv({ cls: "lapse-card-tags-inline" });
+        entry.tags.forEach((tag) => {
+          const tagEl = tagsContainer.createSpan({ text: `#${tag}`, cls: "lapse-card-tag" });
+        });
+      }
       editBtn.onclick = async () => {
         await this.showEditModal(entry, filePath, labelDisplay, labelInput, () => {
           const pageData = this.timeData.get(filePath);
@@ -580,6 +701,14 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       attr: { id: "lapse-edit-duration", readonly: "true" }
     });
     durationInput.readOnly = true;
+    const tagsContainer = content.createDiv({ cls: "lapse-modal-field" });
+    tagsContainer.createEl("label", { text: "Tags (comma-separated, without #)", attr: { for: "lapse-edit-tags" } });
+    const tagsInput = tagsContainer.createEl("input", {
+      type: "text",
+      value: (entry.tags || []).join(", "),
+      cls: "lapse-modal-input",
+      attr: { id: "lapse-edit-tags", placeholder: "tag1, tag2, tag3" }
+    });
     const buttonContainer = content.createDiv({ cls: "lapse-modal-buttons" });
     const saveBtn = buttonContainer.createEl("button", { text: "Save", cls: "mod-cta" });
     const cancelBtn = buttonContainer.createEl("button", { text: "Cancel" });
@@ -608,6 +737,15 @@ var LapsePlugin = class extends import_obsidian.Plugin {
         entry.endTime = new Date(endInput.value).getTime();
       } else {
         entry.endTime = null;
+      }
+      const tagsStr = tagsInput.value.trim();
+      if (tagsStr) {
+        entry.tags = tagsStr.split(",").map((t) => {
+          t = t.trim();
+          return t.startsWith("#") ? t.substring(1) : t;
+        }).filter((t) => t);
+      } else {
+        entry.tags = [];
       }
       if (entry.startTime && entry.endTime) {
         entry.duration = entry.endTime - entry.startTime;
@@ -686,7 +824,8 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       label: entry.label,
       start: entry.startTime ? new Date(entry.startTime).toISOString() : null,
       end: entry.endTime ? new Date(entry.endTime).toISOString() : null,
-      duration: Math.floor(entry.duration / 1e3)
+      duration: Math.floor(entry.duration / 1e3),
+      tags: entry.tags || []
     }));
     const totalTimeTracked = pageData.entries.filter((e) => e.endTime !== null).reduce((sum, e) => sum + e.duration, 0);
     const totalTimeFormatted = this.formatTimeAsHHMMSS(totalTimeTracked);
@@ -734,6 +873,9 @@ var LapsePlugin = class extends import_obsidian.Plugin {
             filteredLines.push(`    end: ${entry.end}`);
           }
           filteredLines.push(`    duration: ${entry.duration}`);
+          if (entry.tags && entry.tags.length > 0) {
+            filteredLines.push(`    tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]`);
+          }
         });
       } else {
         filteredLines.push(`${entriesKey}: []`);
@@ -765,6 +907,9 @@ ${filteredLines.join("\n")}
             frontmatterLines.push(`    end: ${entry.end}`);
           }
           frontmatterLines.push(`    duration: ${entry.duration}`);
+          if (entry.tags && entry.tags.length > 0) {
+            frontmatterLines.push(`    tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]`);
+          }
         });
       } else {
         frontmatterLines.push(`${entriesKey}: []`);
@@ -788,6 +933,20 @@ ${frontmatterLines.join("\n")}
     } else {
       leaf = workspace.getRightLeaf(false);
       await (leaf == null ? void 0 : leaf.setViewState({ type: "lapse-sidebar", active: true }));
+    }
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
+  async activateReportsView() {
+    const { workspace } = this.app;
+    let leaf = null;
+    const leaves = workspace.getLeavesOfType("lapse-reports");
+    if (leaves.length > 0) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      await (leaf == null ? void 0 : leaf.setViewState({ type: "lapse-reports", active: true }));
     }
     if (leaf) {
       workspace.revealLeaf(leaf);
@@ -1168,11 +1327,241 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       }));
     }
+    if (this.plugin.settings.defaultLabelType === "fileName") {
+      new import_obsidian.Setting(containerEl).setName("Remove timestamp from filename").setDesc("When enabled, removes date and time stamps from filenames when setting the default label").addToggle((toggle) => toggle.setValue(this.plugin.settings.removeTimestampFromFileName).onChange(async (value) => {
+        this.plugin.settings.removeTimestampFromFileName = value;
+        await this.plugin.saveSettings();
+      }));
+    }
+    containerEl.createEl("h3", { text: "Tags" });
+    new import_obsidian.Setting(containerEl).setName("Default tag on note").setDesc("Tag to add to notes when time entries are created (e.g., #lapse)").addText((text) => text.setPlaceholder("#lapse").setValue(this.plugin.settings.defaultTagOnNote).onChange(async (value) => {
+      this.plugin.settings.defaultTagOnNote = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Default tag on time entries").setDesc("Tag to automatically add to new time entries (leave empty for none, e.g., #work)").addText((text) => text.setPlaceholder("#work").setValue(this.plugin.settings.defaultTagOnTimeEntries).onChange(async (value) => {
+      this.plugin.settings.defaultTagOnTimeEntries = value;
+      await this.plugin.saveSettings();
+    }));
     containerEl.createEl("h3", { text: "Timer Controls" });
     new import_obsidian.Setting(containerEl).setName("Time Adjust Minutes").setDesc("Number of minutes to adjust start time when using << or >> buttons").addText((text) => text.setPlaceholder("5").setValue(this.plugin.settings.timeAdjustMinutes.toString()).onChange(async (value) => {
       const numValue = parseInt(value) || 5;
       this.plugin.settings.timeAdjustMinutes = numValue;
       await this.plugin.saveSettings();
     }));
+  }
+};
+var LapseReportsView = class extends import_obsidian.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.period = "daily";
+    this.groupBy = "note";
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return "lapse-reports";
+  }
+  getDisplayText() {
+    return "Time Reports";
+  }
+  getIcon() {
+    return "bar-chart-2";
+  }
+  async onOpen() {
+    await this.render();
+  }
+  async render() {
+    const container = this.containerEl.children[1];
+    container.empty();
+    const header = container.createDiv({ cls: "lapse-reports-header" });
+    const tabsContainer = header.createDiv({ cls: "lapse-reports-tabs" });
+    const dailyTab = tabsContainer.createEl("button", { text: "Daily", cls: "lapse-reports-tab" });
+    const weeklyTab = tabsContainer.createEl("button", { text: "Weekly", cls: "lapse-reports-tab" });
+    const monthlyTab = tabsContainer.createEl("button", { text: "Monthly", cls: "lapse-reports-tab" });
+    const updateTabs = () => {
+      [dailyTab, weeklyTab, monthlyTab].forEach((tab) => tab.removeClass("is-active"));
+      if (this.period === "daily")
+        dailyTab.addClass("is-active");
+      if (this.period === "weekly")
+        weeklyTab.addClass("is-active");
+      if (this.period === "monthly")
+        monthlyTab.addClass("is-active");
+    };
+    dailyTab.onclick = async () => {
+      this.period = "daily";
+      updateTabs();
+      await this.render();
+    };
+    weeklyTab.onclick = async () => {
+      this.period = "weekly";
+      updateTabs();
+      await this.render();
+    };
+    monthlyTab.onclick = async () => {
+      this.period = "monthly";
+      updateTabs();
+      await this.render();
+    };
+    updateTabs();
+    const controlsContainer = header.createDiv({ cls: "lapse-reports-controls" });
+    const groupBySetting = controlsContainer.createDiv({ cls: "lapse-reports-groupby" });
+    groupBySetting.createEl("label", { text: "Group by: " });
+    const groupBySelect = groupBySetting.createEl("select", { cls: "lapse-reports-select" });
+    groupBySelect.createEl("option", { text: "Note", value: "note" });
+    groupBySelect.createEl("option", { text: "Project", value: "project" });
+    groupBySelect.createEl("option", { text: "Date", value: "date" });
+    groupBySelect.value = this.groupBy;
+    groupBySelect.onchange = async () => {
+      this.groupBy = groupBySelect.value;
+      await this.render();
+    };
+    const data = await this.getReportData();
+    const summary = container.createDiv({ cls: "lapse-reports-summary" });
+    const totalTime = data.reduce((sum, item) => sum + item.totalTime, 0);
+    summary.createEl("h3", { text: `Total: ${this.plugin.formatTimeAsHHMMSS(totalTime)}` });
+    const tableContainer = container.createDiv({ cls: "lapse-reports-table-container" });
+    const table = tableContainer.createEl("table", { cls: "lapse-reports-table" });
+    const thead = table.createEl("thead");
+    const headerRow = thead.createEl("tr");
+    headerRow.createEl("th", { text: this.getGroupByLabel() });
+    headerRow.createEl("th", { text: "Time" });
+    headerRow.createEl("th", { text: "Entries" });
+    const tbody = table.createEl("tbody");
+    const sortedData = [...data].sort((a, b) => b.totalTime - a.totalTime);
+    for (const item of sortedData) {
+      const row = tbody.createEl("tr");
+      row.createEl("td", { text: item.group });
+      row.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(item.totalTime) });
+      row.createEl("td", { text: item.entryCount.toString() });
+    }
+    if (data.length > 0) {
+      const chartContainer = container.createDiv({ cls: "lapse-reports-chart-container" });
+      await this.renderChart(chartContainer, data, totalTime);
+    }
+  }
+  getGroupByLabel() {
+    switch (this.groupBy) {
+      case "note":
+        return "Note";
+      case "project":
+        return "Project";
+      case "date":
+        return "Date";
+      default:
+        return "Group";
+    }
+  }
+  async getReportData() {
+    const now = new Date();
+    let startDate;
+    let endDate = new Date(now);
+    if (this.period === "daily") {
+      startDate = new Date(now);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (this.period === "weekly") {
+      startDate = new Date(now);
+      const dayOfWeek = startDate.getDay();
+      startDate.setDate(startDate.getDate() - dayOfWeek);
+      startDate.setHours(0, 0, 0, 0);
+    } else {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      startDate.setHours(0, 0, 0, 0);
+    }
+    const startTime = startDate.getTime();
+    const endTime = endDate.getTime();
+    const entries = [];
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    for (const file of markdownFiles) {
+      const filePath = file.path;
+      if (!this.plugin.timeData.has(filePath)) {
+        await this.plugin.loadEntriesFromFrontmatter(filePath);
+      }
+      const pageData = this.plugin.timeData.get(filePath);
+      if (pageData) {
+        const project = await this.plugin.getProjectFromFrontmatter(filePath);
+        for (const entry of pageData.entries) {
+          if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+            if (entry.endTime || entry.startTime && !entry.endTime) {
+              entries.push({ filePath, entry, project });
+            }
+          }
+        }
+      }
+    }
+    const grouped = /* @__PURE__ */ new Map();
+    for (const { filePath, entry, project } of entries) {
+      let groupKey;
+      if (this.groupBy === "note") {
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        groupKey = file && file instanceof import_obsidian.TFile ? file.basename : filePath;
+      } else if (this.groupBy === "project") {
+        groupKey = project || "No Project";
+      } else {
+        const date = new Date(entry.startTime);
+        if (this.period === "daily") {
+          groupKey = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        } else if (this.period === "weekly") {
+          const weekStart = new Date(date);
+          weekStart.setDate(date.getDate() - date.getDay());
+          groupKey = `Week of ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+        } else {
+          groupKey = date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+        }
+      }
+      const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, { totalTime: 0, entryCount: 0 });
+      }
+      const group = grouped.get(groupKey);
+      group.totalTime += entryDuration;
+      group.entryCount += 1;
+    }
+    return Array.from(grouped.entries()).map(([group, data]) => ({
+      group,
+      ...data
+    }));
+  }
+  async renderChart(container, data, totalTime) {
+    container.empty();
+    container.createEl("h4", { text: "Time Distribution" });
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "lapse-reports-chart");
+    svg.setAttribute("width", "400");
+    svg.setAttribute("height", "300");
+    svg.setAttribute("viewBox", "0 0 400 300");
+    container.appendChild(svg);
+    const maxTime = Math.max(...data.map((d) => d.totalTime));
+    const barWidth = 350 / data.length;
+    const maxBarHeight = 250;
+    const colors = [
+      "#4A90E2",
+      "#50C878",
+      "#FF6B6B",
+      "#FFD93D",
+      "#9B59B6",
+      "#E67E22",
+      "#1ABC9C",
+      "#E74C3C"
+    ];
+    data.forEach((item, index) => {
+      const barHeight = item.totalTime / maxTime * maxBarHeight;
+      const x = 25 + index * barWidth;
+      const y = 275 - barHeight;
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", x.toString());
+      rect.setAttribute("y", y.toString());
+      rect.setAttribute("width", (barWidth - 2).toString());
+      rect.setAttribute("height", barHeight.toString());
+      rect.setAttribute("fill", colors[index % colors.length]);
+      rect.setAttribute("rx", "2");
+      svg.appendChild(rect);
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", (x + barWidth / 2).toString());
+      text.setAttribute("y", "290");
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("font-size", "10");
+      text.setAttribute("fill", "var(--text-muted)");
+      text.textContent = item.group.length > 10 ? item.group.substring(0, 10) + "..." : item.group;
+      svg.appendChild(text);
+    });
   }
 };

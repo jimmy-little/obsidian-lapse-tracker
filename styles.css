@@ -115,7 +115,9 @@
 
 .lapse-summary {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
     font-size: 11px;
     color: var(--text-muted);
     padding: 2px 0;
@@ -127,9 +129,14 @@
     padding-left: 0;
 }
 
+.lapse-summary-right {
+    text-align: right;
+    padding-right: 0;
+}
+
 .lapse-buttons-container {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     align-items: flex-start;
     gap: 4px;
 }
@@ -137,8 +144,7 @@
 .lapse-today-label {
     font-size: 11px;
     color: var(--text-muted);
-    text-align: left;
-    padding-top: 2px;
+    text-align: right;
 }
 
 .lapse-btn-play-stop,
@@ -247,14 +253,40 @@
 
 .lapse-card-details {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-direction: row;
+    gap: 12px;
     font-size: 12px;
     color: var(--text-muted);
+    margin-bottom: 4px;
 }
 
 .lapse-card-detail {
     line-height: 1.4;
+}
+
+.lapse-card-bottom-line {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.lapse-card-tags-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.lapse-card-tag {
+    font-size: 11px;
+    color: var(--text-accent);
+    background: var(--background-secondary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
 }
 
 .lapse-input {
@@ -569,4 +601,128 @@
     margin-top: 20px;
     padding-top: 16px;
     border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Reports View Styles */
+
+.lapse-reports-header {
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.lapse-reports-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.lapse-reports-tab {
+    padding: 8px 16px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 13px;
+}
+
+.lapse-reports-tab:hover {
+    background: var(--background-modifier-hover);
+}
+
+.lapse-reports-tab.is-active {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border-color: var(--interactive-accent);
+}
+
+.lapse-reports-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.lapse-reports-groupby {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.lapse-reports-select {
+    padding: 4px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.lapse-reports-summary {
+    margin: 20px 0;
+    padding: 16px;
+    background: var(--background-secondary);
+    border-radius: 6px;
+}
+
+.lapse-reports-summary h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-accent);
+}
+
+.lapse-reports-table-container {
+    margin: 20px 0;
+    overflow-x: auto;
+}
+
+.lapse-reports-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.lapse-reports-table thead {
+    background: var(--background-secondary);
+}
+
+.lapse-reports-table th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-normal);
+    border-bottom: 2px solid var(--background-modifier-border);
+}
+
+.lapse-reports-table td {
+    padding: 12px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    font-size: 13px;
+}
+
+.lapse-reports-table tbody tr:hover {
+    background: var(--background-secondary);
+}
+
+.lapse-reports-chart-container {
+    margin: 20px 0;
+    padding: 20px;
+    background: var(--background-secondary);
+    border-radius: 6px;
+}
+
+.lapse-reports-chart-container h4 {
+    margin: 0 0 16px 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.lapse-reports-chart {
+    width: 100%;
+    max-width: 400px;
+    height: auto;
 }
