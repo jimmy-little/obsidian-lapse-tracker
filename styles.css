@@ -494,6 +494,55 @@
     margin-left: 8px;
 }
 
+/* Activity Card Styles */
+.lapse-activity-card {
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 20px;
+    margin: 12px 0;
+    text-align: center;
+}
+
+.lapse-activity-timer {
+    font-size: 48px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+    margin-bottom: 16px;
+    line-height: 1.2;
+}
+
+.lapse-activity-details {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+    font-size: 13px;
+}
+
+.lapse-activity-page {
+    font-weight: 600;
+    color: var(--link-color, var(--text-accent));
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.lapse-activity-page:hover {
+    text-decoration: underline;
+}
+
+.lapse-activity-project {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.lapse-activity-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 /* Pie Chart Section */
 .lapse-sidebar-chart-section {
     margin-top: 16px;
@@ -641,6 +690,7 @@
 .lapse-reports-controls {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 12px;
 }
 
@@ -659,6 +709,40 @@
     color: var(--text-normal);
     font-size: 13px;
     cursor: pointer;
+}
+
+.lapse-reports-custom-date {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    font-size: 13px;
+}
+
+.lapse-date-input {
+    padding: 4px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.lapse-apply-btn {
+    padding: 6px 16px;
+    border-radius: 4px;
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.lapse-apply-btn:hover {
+    opacity: 0.9;
 }
 
 .lapse-reports-summary {
@@ -708,11 +792,63 @@
     background: var(--background-secondary);
 }
 
+.lapse-reports-group-row {
+    font-weight: 600;
+    background: var(--background-secondary);
+}
+
+.lapse-reports-group-row:hover {
+    background: var(--background-secondary-alt) !important;
+}
+
+.lapse-reports-subgroup-row {
+    background: var(--background-primary-alt);
+    font-weight: 500;
+}
+
+.lapse-reports-entry-row {
+    font-size: 0.9em;
+    color: var(--text-muted);
+}
+
+.lapse-reports-entry-row:hover {
+    background: var(--background-modifier-hover) !important;
+}
+
+.lapse-reports-expand-cell {
+    width: 24px;
+    text-align: center;
+}
+
+.lapse-reports-expand-btn {
+    display: inline-block;
+    cursor: pointer;
+}
+
+.lapse-reports-group-name {
+    font-weight: 600;
+}
+
+.lapse-reports-subgroup-name {
+    padding-left: 20px;
+}
+
+.lapse-reports-entry-label {
+    padding-left: 20px;
+    font-style: italic;
+}
+
+.lapse-reports-note-name {
+    font-size: 0.85em;
+    color: var(--text-faint);
+}
+
 .lapse-reports-chart-container {
     margin: 20px 0;
     padding: 20px;
     background: var(--background-secondary);
     border-radius: 6px;
+    width: 100%;
 }
 
 .lapse-reports-chart-container h4 {
@@ -723,6 +859,10 @@
 
 .lapse-reports-chart {
     width: 100%;
-    max-width: 400px;
     height: auto;
+    display: block;
+}
+
+.lapse-chart-label {
+    font-family: var(--font-interface);
 }
