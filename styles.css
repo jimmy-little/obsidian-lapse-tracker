@@ -29,7 +29,7 @@
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     color: var(--text-accent);
-    min-width: 80px;
+    min-width: 110px;
     text-align: center;
     padding: 6px 0;
     line-height: 1.5;
@@ -70,11 +70,13 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    align-items: flex-start;
 }
 
 .lapse-label-input {
     width: 100%;
     padding: 6px 12px;
+    padding-left: 0;
     border: 1px solid var(--background-modifier-border);
     border-radius: 4px;
     background: var(--background-primary);
@@ -91,36 +93,52 @@
 .lapse-label-display {
     width: 100%;
     padding: 6px 12px;
+    padding-left: 0;
     color: var(--text-normal);
     font-size: 13px;
     font-family: inherit;
     line-height: 1.5;
+    text-align: left;
 }
 
 .lapse-label-display-running {
     width: 100%;
     padding: 6px 12px;
+    padding-left: 0;
     color: var(--text-normal);
     font-size: 18px;
     font-weight: 700;
     font-family: inherit;
     line-height: 1.5;
+    text-align: left;
 }
 
 .lapse-summary {
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
     font-size: 11px;
     color: var(--text-muted);
     padding: 2px 0;
+    width: 100%;
 }
 
 .lapse-summary-left {
     text-align: left;
+    padding-left: 0;
 }
 
-.lapse-summary-right {
-    text-align: right;
+.lapse-buttons-container {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.lapse-today-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: left;
+    padding-top: 2px;
 }
 
 .lapse-btn-play-stop,

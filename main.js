@@ -298,15 +298,16 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     }
     const summaryLine = inputContainer.createDiv({ cls: "lapse-summary" });
     const summaryLeft = summaryLine.createDiv({ cls: "lapse-summary-left" });
-    const summaryRight = summaryLine.createDiv({ cls: "lapse-summary-right" });
-    const playStopBtn = actionBar.createEl("button", { cls: "lapse-btn-play-stop" });
+    const buttonsContainer = actionBar.createDiv({ cls: "lapse-buttons-container" });
+    const playStopBtn = buttonsContainer.createEl("button", { cls: "lapse-btn-play-stop" });
     if (activeTimer) {
       (0, import_obsidian.setIcon)(playStopBtn, "square");
     } else {
       (0, import_obsidian.setIcon)(playStopBtn, "play");
     }
-    const chevronBtn = actionBar.createEl("button", { cls: "lapse-btn-chevron" });
+    const chevronBtn = buttonsContainer.createEl("button", { cls: "lapse-btn-chevron" });
     (0, import_obsidian.setIcon)(chevronBtn, "chevron-down");
+    const todayLabel = buttonsContainer.createDiv({ cls: "lapse-today-label" });
     const calculateTotalTime = () => {
       return pageData.entries.reduce((sum, e) => {
         if (e.endTime !== null) {
@@ -346,7 +347,7 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       const totalTime = calculateTotalTime();
       summaryLeft.setText(`${entryCount} ${entryCount === 1 ? "entry" : "entries"}, ${this.formatTimeAsHHMMSS(totalTime)}`);
       const todayTotal = calculateTodayTotal();
-      summaryRight.setText(`Today: ${this.formatTimeAsHHMMSS(todayTotal)}`);
+      todayLabel.setText(`Today: ${this.formatTimeAsHHMMSS(todayTotal)}`);
     };
     updateDisplays();
     let updateInterval = null;
@@ -896,13 +897,18 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     if (this.refreshInterval) {
       clearInterval(this.refreshInterval);
     }
-    if (activeTimers.length > 0) {
-      this.refreshInterval = window.setInterval(() => this.updateTimers(), 1e3);
-    } else {
-      this.refreshInterval = null;
-    }
+    this.refreshInterval = window.setInterval(() => {
+      this.updateTimers().catch((err) => console.error("Error updating timers:", err));
+    }, 2e3);
   }
-  updateTimers() {
+  async updateTimers() {
+    const currentActiveTimers = await this.plugin.getActiveTimers();
+    const displayedEntryIds = new Set(this.timeDisplays.keys());
+    const activeEntryIds = new Set(currentActiveTimers.map(({ entry }) => entry.id));
+    if (currentActiveTimers.length !== displayedEntryIds.size || ![...displayedEntryIds].every((id) => activeEntryIds.has(id))) {
+      await this.render();
+      return;
+    }
     this.timeDisplays.forEach((timeDisplay, entryId) => {
       let foundEntry = null;
       let found = false;
@@ -925,11 +931,6 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
         this.timeDisplays.delete(entryId);
       }
     });
-    if (this.timeDisplays.size === 0 && this.refreshInterval) {
-      clearInterval(this.refreshInterval);
-      this.refreshInterval = null;
-      this.render();
-    }
   }
   async refresh() {
     await this.render();

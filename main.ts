@@ -392,10 +392,12 @@ export default class LapsePlugin extends Plugin {
 		// Summary line under input
 		const summaryLine = inputContainer.createDiv({ cls: 'lapse-summary' });
 		const summaryLeft = summaryLine.createDiv({ cls: 'lapse-summary-left' });
-		const summaryRight = summaryLine.createDiv({ cls: 'lapse-summary-right' });
 
+		// Buttons container with "Today" label below
+		const buttonsContainer = actionBar.createDiv({ cls: 'lapse-buttons-container' });
+		
 		// Play/Stop button
-		const playStopBtn = actionBar.createEl('button', { cls: 'lapse-btn-play-stop' });
+		const playStopBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-play-stop' });
 		if (activeTimer) {
 			setIcon(playStopBtn, 'square');
 		} else {
@@ -403,8 +405,11 @@ export default class LapsePlugin extends Plugin {
 		}
 
 		// Chevron button to toggle panel
-		const chevronBtn = actionBar.createEl('button', { cls: 'lapse-btn-chevron' });
+		const chevronBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-chevron' });
 		setIcon(chevronBtn, 'chevron-down');
+		
+		// Today label under buttons
+		const todayLabel = buttonsContainer.createDiv({ cls: 'lapse-today-label' });
 
 		// Helper function to calculate total time (including active timer if running)
 		const calculateTotalTime = (): number => {
@@ -461,7 +466,7 @@ export default class LapsePlugin extends Plugin {
 			summaryLeft.setText(`${entryCount} ${entryCount === 1 ? 'entry' : 'entries'}, ${this.formatTimeAsHHMMSS(totalTime)}`);
 
 			const todayTotal = calculateTodayTotal();
-			summaryRight.setText(`Today: ${this.formatTimeAsHHMMSS(todayTotal)}`);
+			todayLabel.setText(`Today: ${this.formatTimeAsHHMMSS(todayTotal)}`);
 		};
 
 		// Initial update
@@ -1220,22 +1225,33 @@ class LapseSidebarView extends ItemView {
 			}
 		}
 
-		// Set up refresh interval - only update timers, not rebuild everything
+		// Set up refresh interval - always run to detect new timers
 		// Clear any existing interval first
 		if (this.refreshInterval) {
 			clearInterval(this.refreshInterval);
 		}
 		
-		// Set up new interval if there are active timers
-		if (activeTimers.length > 0) {
-			this.refreshInterval = window.setInterval(() => this.updateTimers(), 1000);
-		} else {
-			this.refreshInterval = null;
-		}
+		// Always set up interval to check for new/stopped timers and update displays
+		this.refreshInterval = window.setInterval(() => {
+			this.updateTimers().catch(err => console.error('Error updating timers:', err));
+		}, 2000);
 	}
 
-	updateTimers() {
-		// Only update the time displays, don't rebuild everything
+	async updateTimers() {
+		// First, check for new active timers that aren't in the display yet
+		const currentActiveTimers = await this.plugin.getActiveTimers();
+		const displayedEntryIds = new Set(this.timeDisplays.keys());
+		const activeEntryIds = new Set(currentActiveTimers.map(({ entry }) => entry.id));
+		
+		// If there are new active timers or timers that stopped, do a full refresh
+		if (currentActiveTimers.length !== displayedEntryIds.size || 
+		    ![...displayedEntryIds].every(id => activeEntryIds.has(id))) {
+			// New timer started or timer stopped - do full refresh
+			await this.render();
+			return;
+		}
+		
+		// Only update the time displays for existing timers
 		this.timeDisplays.forEach((timeDisplay, entryId) => {
 			// Find the entry in timeData
 			let foundEntry: TimeEntry | null = null;
@@ -1263,11 +1279,7 @@ class LapseSidebarView extends ItemView {
 		});
 		
 		// If no more active timers, re-render to show "No active timers"
-		if (this.timeDisplays.size === 0 && this.refreshInterval) {
-			clearInterval(this.refreshInterval);
-			this.refreshInterval = null;
-			this.render();
-		}
+		// (But keep the interval running to detect new timers)
 	}
 
 	async refresh() {
