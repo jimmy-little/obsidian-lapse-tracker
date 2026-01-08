@@ -182,32 +182,79 @@
     border-top: 1px solid var(--background-modifier-border);
 }
 
-.lapse-table {
-    width: 100%;
-    border-collapse: collapse;
+.lapse-cards-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     margin-bottom: 12px;
 }
 
-.lapse-table thead {
+.lapse-entry-card {
     background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 12px;
+    position: relative;
 }
 
-.lapse-table th {
-    padding: 8px 12px;
-    text-align: left;
+.lapse-card-top-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+    gap: 8px;
+}
+
+.lapse-card-label {
+    font-size: 16px;
     font-weight: 600;
-    font-size: 13px;
     color: var(--text-normal);
-    border-bottom: 2px solid var(--background-modifier-border);
+    flex: 1;
+    line-height: 1.4;
 }
 
-.lapse-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--background-modifier-border);
+.lapse-card-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
 }
 
-.lapse-table tbody tr:hover {
-    background: var(--background-secondary);
+.lapse-card-btn-edit,
+.lapse-card-btn-delete {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 24px;
+    border-radius: 4px;
+}
+
+.lapse-card-btn-edit:hover {
+    background: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+
+.lapse-card-btn-delete:hover {
+    background: var(--background-modifier-hover);
+    color: var(--text-error, #d32f2f);
+}
+
+.lapse-card-details {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.lapse-card-detail {
+    line-height: 1.4;
 }
 
 .lapse-input {
@@ -413,4 +460,113 @@
     font-variant-numeric: tabular-nums;
     color: var(--text-muted);
     margin-left: 8px;
+}
+
+/* Pie Chart Section */
+.lapse-sidebar-chart-section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.lapse-sidebar-total-time {
+    font-size: 24px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+    text-align: center;
+    margin: 12px 0;
+}
+
+.lapse-sidebar-chart-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin: 16px 0;
+}
+
+.lapse-sidebar-pie-chart {
+    max-width: 200px;
+    max-height: 200px;
+}
+
+.lapse-sidebar-chart-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.lapse-sidebar-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.lapse-sidebar-legend-color {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    border: 1px solid var(--background-modifier-border);
+}
+
+.lapse-sidebar-legend-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex: 1;
+    gap: 8px;
+}
+
+.lapse-sidebar-legend-time {
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+/* Modal Styles */
+
+.lapse-modal-field {
+    margin-bottom: 16px;
+}
+
+.lapse-modal-field label {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-normal);
+}
+
+.lapse-modal-input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.lapse-modal-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+}
+
+.lapse-modal-input[readonly] {
+    background: var(--background-secondary);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+.lapse-modal-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--background-modifier-border);
 }

@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, MarkdownPostProcessorContext, TFile, setIcon } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, MarkdownPostProcessorContext, TFile, setIcon, Modal } from 'obsidian';
 
 interface LapseSettings {
 	dateFormat: string;
@@ -395,7 +395,7 @@ export default class LapsePlugin extends Plugin {
 
 		// Buttons container with "Today" label below
 		const buttonsContainer = actionBar.createDiv({ cls: 'lapse-buttons-container' });
-		
+
 		// Play/Stop button
 		const playStopBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-play-stop' });
 		if (activeTimer) {
@@ -504,27 +504,15 @@ export default class LapsePlugin extends Plugin {
 			}
 		};
 
-		// Collapsible panel for table
+		// Collapsible panel for entries cards
 		const panel = container.createDiv({ cls: 'lapse-panel' });
 		panel.style.display = 'none'; // Start collapsed
 
-		// Table
-		const table = panel.createEl('table', { cls: 'lapse-table' });
-		
-		// Table header
-		const thead = table.createEl('thead');
-		const headerRow = thead.createEl('tr');
-		headerRow.createEl('th', { text: 'Entry' });
-		headerRow.createEl('th', { text: 'Start' });
-		headerRow.createEl('th', { text: 'End' });
-		headerRow.createEl('th', { text: 'Duration' });
-		headerRow.createEl('th', { text: 'Actions' });
+		// Cards container
+		const cardsContainer = panel.createDiv({ cls: 'lapse-cards-container' });
 
-		// Table body
-		const tbody = table.createEl('tbody', { cls: 'lapse-table-body' });
-
-		// Render all entries
-		this.renderTableRows(tbody, pageData.entries, filePath, labelDisplay, labelInput);
+		// Render all entries as cards
+		this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 
 		// Add button to add new entry
 		const addButton = panel.createEl('button', { 
@@ -583,7 +571,7 @@ export default class LapsePlugin extends Plugin {
 				}
 				setIcon(playStopBtn, 'play');
 				updateDisplays(); // Update displays immediately
-				this.renderTableRows(tbody, pageData.entries, filePath, labelDisplay, labelInput);
+				this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 
 				// Update sidebar
 				this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
@@ -639,7 +627,7 @@ export default class LapsePlugin extends Plugin {
 				}
 				setIcon(playStopBtn, 'square');
 				updateDisplays(); // Update displays immediately
-				this.renderTableRows(tbody, pageData.entries, filePath, labelDisplay, labelInput);
+				this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 
 				// Update sidebar
 				this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
@@ -661,145 +649,225 @@ export default class LapsePlugin extends Plugin {
 			};
 			pageData.entries.push(newEntry);
 			await this.updateFrontmatter(filePath);
-			this.renderTableRows(tbody, pageData.entries, filePath, labelDisplay, labelInput);
+			this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 		};
 	}
 
-	renderTableRows(tbody: HTMLElement, entries: TimeEntry[], filePath: string, labelDisplay?: HTMLElement, labelInput?: HTMLInputElement | null) {
-		tbody.empty();
+	renderEntryCards(cardsContainer: HTMLElement, entries: TimeEntry[], filePath: string, labelDisplay?: HTMLElement, labelInput?: HTMLInputElement | null) {
+		cardsContainer.empty();
 
-		entries.forEach((entry, index) => {
-			const row = tbody.createEl('tr', { cls: 'lapse-table-row' });
+		entries.forEach((entry) => {
+			const card = cardsContainer.createDiv({ cls: 'lapse-entry-card' });
 			
-			// Entry (label) cell
-			const labelCell = row.createEl('td', { cls: 'lapse-cell-label' });
-			const entryLabelInput = labelCell.createEl('input', {
-				type: 'text',
-				value: entry.label,
-				cls: 'lapse-input'
-			});
-			entryLabelInput.readOnly = true;
-
-			// Start cell
-			const startCell = row.createEl('td', { cls: 'lapse-cell-start' });
-			const startInput = startCell.createEl('input', {
-				type: 'datetime-local',
-				cls: 'lapse-input'
-			});
-			if (entry.startTime) {
-				const date = new Date(entry.startTime);
-				startInput.value = this.formatDateTimeLocal(date);
-			}
-			startInput.readOnly = true;
-
-			// End cell
-			const endCell = row.createEl('td', { cls: 'lapse-cell-end' });
-			const endInput = endCell.createEl('input', {
-				type: 'datetime-local',
-				cls: 'lapse-input'
-			});
-			if (entry.endTime) {
-				const date = new Date(entry.endTime);
-				endInput.value = this.formatDateTimeLocal(date);
-			}
-			endInput.readOnly = true;
-
-			// Duration cell
-			const durationCell = row.createEl('td', { cls: 'lapse-cell-duration' });
-			const durationInput = durationCell.createEl('input', {
-				type: 'text',
-				value: this.formatTimeAsHHMMSS(entry.duration),
-				cls: 'lapse-input'
-			});
-			durationInput.readOnly = true;
-
-			// Actions cell
-			const actionsCell = row.createEl('td', { cls: 'lapse-cell-actions' });
-			const editBtn = actionsCell.createEl('button', { cls: 'lapse-btn-edit' });
-			const deleteBtn = actionsCell.createEl('button', { cls: 'lapse-btn-delete' });
+			// Top line: label and action buttons
+			const topLine = card.createDiv({ cls: 'lapse-card-top-line' });
+			const labelDiv = topLine.createDiv({ cls: 'lapse-card-label' });
+			labelDiv.setText(entry.label);
 			
-			// Set icons for buttons
+			// Action buttons
+			const actionsDiv = topLine.createDiv({ cls: 'lapse-card-actions' });
+			const editBtn = actionsDiv.createEl('button', { cls: 'lapse-card-btn-edit' });
+			const deleteBtn = actionsDiv.createEl('button', { cls: 'lapse-card-btn-delete' });
+			
 			setIcon(editBtn, 'pencil');
 			setIcon(deleteBtn, 'trash');
 
-			let isEditing = false;
+			// Second line: start, end, duration
+			const detailsLine = card.createDiv({ cls: 'lapse-card-details' });
+			
+			const startText = entry.startTime 
+				? new Date(entry.startTime).toLocaleString('en-US', { 
+					month: 'short', day: 'numeric', year: 'numeric',
+					hour: 'numeric', minute: '2-digit'
+				})
+				: '--';
+			const endText = entry.endTime 
+				? new Date(entry.endTime).toLocaleString('en-US', { 
+					month: 'short', day: 'numeric', year: 'numeric',
+					hour: 'numeric', minute: '2-digit'
+				})
+				: '--';
+			const durationText = this.formatTimeAsHHMMSS(entry.duration);
 
+			detailsLine.createSpan({ text: `Start: ${startText}`, cls: 'lapse-card-detail' });
+			detailsLine.createSpan({ text: `End: ${endText}`, cls: 'lapse-card-detail' });
+			detailsLine.createSpan({ text: `Duration: ${durationText}`, cls: 'lapse-card-detail' });
+
+			// Edit button handler - opens modal
 			editBtn.onclick = async () => {
-				if (!isEditing) {
-					// Enable editing (duration is always read-only and calculated)
-					entryLabelInput.readOnly = false;
-					startInput.readOnly = false;
-					endInput.readOnly = false;
-					// durationInput is always readOnly - don't change it
-					setIcon(editBtn, 'check');
-					isEditing = true;
-				} else {
-					// Save changes
-					entry.label = entryLabelInput.value;
-					
-					const oldStartTime = entry.startTime;
-					const oldEndTime = entry.endTime;
-					
-					if (startInput.value) {
-						entry.startTime = new Date(startInput.value).getTime();
-					} else {
-						entry.startTime = null;
-					}
-					
-					if (endInput.value) {
-						entry.endTime = new Date(endInput.value).getTime();
-					} else {
-						entry.endTime = null;
-					}
-
-					// Calculate duration from start and end times
-					if (entry.startTime && entry.endTime) {
-						entry.duration = entry.endTime - entry.startTime;
-					} else if (entry.startTime && !entry.endTime) {
-						// Active timer - preserve existing duration
-						// Don't recalculate
-					}
-
-					// Update duration display
-					durationInput.value = this.formatTimeAsHHMMSS(entry.duration);
-
-					// Disable editing
-					entryLabelInput.readOnly = true;
-					startInput.readOnly = true;
-					endInput.readOnly = true;
-					// durationInput is always readOnly
-					setIcon(editBtn, 'pencil');
-					isEditing = false;
-
-					// Update action bar label if this is the active timer
-					const isActiveTimer = entry.startTime !== null && entry.endTime === null;
-					if (isActiveTimer && labelDisplay) {
-						if (labelInput) {
-							labelInput.value = entry.label;
-						} else {
-							labelDisplay.setText(entry.label);
-						}
-					}
-
-					// Update frontmatter
-					await this.updateFrontmatter(filePath);
-					
-					// Refresh the table to show updated duration
+				await this.showEditModal(entry, filePath, labelDisplay, labelInput, () => {
+					// Refresh cards after edit
 					const pageData = this.timeData.get(filePath);
 					if (pageData) {
-						this.renderTableRows(tbody, pageData.entries, filePath, labelDisplay, labelInput);
+						this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
+					}
+				});
+			};
+
+			// Delete button handler - shows confirmation
+			deleteBtn.onclick = async () => {
+				const confirmed = await this.showDeleteConfirmation(entry.label);
+				if (confirmed) {
+					const pageData = this.timeData.get(filePath);
+					if (pageData) {
+						pageData.entries = pageData.entries.filter(e => e.id !== entry.id);
+						await this.updateFrontmatter(filePath);
+						this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 					}
 				}
 			};
+		});
+	}
 
-			deleteBtn.onclick = async () => {
-				const pageData = this.timeData.get(filePath);
-				if (pageData) {
-					pageData.entries = pageData.entries.filter(e => e.id !== entry.id);
-					await this.updateFrontmatter(filePath);
-					this.renderTableRows(tbody, pageData.entries, filePath, labelDisplay, labelInput);
+	async showEditModal(entry: TimeEntry, filePath: string, labelDisplay?: HTMLElement, labelInputParam?: HTMLInputElement | null, onSave?: () => void) {
+		const modal = new Modal(this.app);
+		modal.titleEl.setText('Edit Entry');
+		
+		const content = modal.contentEl;
+		content.empty();
+
+		// Label input
+		const labelContainer = content.createDiv({ cls: 'lapse-modal-field' });
+		labelContainer.createEl('label', { text: 'Label', attr: { for: 'lapse-edit-label' } });
+		const labelInput = labelContainer.createEl('input', {
+			type: 'text',
+			value: entry.label,
+			cls: 'lapse-modal-input',
+			attr: { id: 'lapse-edit-label' }
+		}) as HTMLInputElement;
+
+		// Start input
+		const startContainer = content.createDiv({ cls: 'lapse-modal-field' });
+		startContainer.createEl('label', { text: 'Start Time', attr: { for: 'lapse-edit-start' } });
+		const startInput = startContainer.createEl('input', {
+			type: 'datetime-local',
+			cls: 'lapse-modal-input',
+			attr: { id: 'lapse-edit-start' }
+		}) as HTMLInputElement;
+		if (entry.startTime) {
+			startInput.value = this.formatDateTimeLocal(new Date(entry.startTime));
+		}
+
+		// End input
+		const endContainer = content.createDiv({ cls: 'lapse-modal-field' });
+		endContainer.createEl('label', { text: 'End Time', attr: { for: 'lapse-edit-end' } });
+		const endInput = endContainer.createEl('input', {
+			type: 'datetime-local',
+			cls: 'lapse-modal-input',
+			attr: { id: 'lapse-edit-end' }
+		}) as HTMLInputElement;
+		if (entry.endTime) {
+			endInput.value = this.formatDateTimeLocal(new Date(entry.endTime));
+		}
+
+		// Duration display (read-only)
+		const durationContainer = content.createDiv({ cls: 'lapse-modal-field' });
+		durationContainer.createEl('label', { text: 'Duration', attr: { for: 'lapse-edit-duration' } });
+		const durationInput = durationContainer.createEl('input', {
+			type: 'text',
+			value: this.formatTimeAsHHMMSS(entry.duration),
+			cls: 'lapse-modal-input',
+			attr: { id: 'lapse-edit-duration', readonly: 'true' }
+		}) as HTMLInputElement;
+		durationInput.readOnly = true;
+
+		// Buttons
+		const buttonContainer = content.createDiv({ cls: 'lapse-modal-buttons' });
+		const saveBtn = buttonContainer.createEl('button', { text: 'Save', cls: 'mod-cta' });
+		const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
+
+		// Update duration when start/end change
+		const updateDuration = () => {
+			const start = startInput.value ? new Date(startInput.value).getTime() : null;
+			const end = endInput.value ? new Date(endInput.value).getTime() : null;
+			if (start && end) {
+				const duration = end - start;
+				durationInput.value = this.formatTimeAsHHMMSS(duration);
+			} else if (entry.startTime && !entry.endTime) {
+				// Active timer - keep existing duration
+				durationInput.value = this.formatTimeAsHHMMSS(entry.duration);
+			} else {
+				durationInput.value = this.formatTimeAsHHMMSS(entry.duration);
+			}
+		};
+
+		startInput.addEventListener('change', updateDuration);
+		endInput.addEventListener('change', updateDuration);
+
+		// Save handler
+		saveBtn.onclick = async () => {
+			entry.label = labelInput.value;
+			
+			if (startInput.value) {
+				entry.startTime = new Date(startInput.value).getTime();
+			} else {
+				entry.startTime = null;
+			}
+			
+			if (endInput.value) {
+				entry.endTime = new Date(endInput.value).getTime();
+			} else {
+				entry.endTime = null;
+			}
+
+			// Calculate duration from start and end times
+			if (entry.startTime && entry.endTime) {
+				entry.duration = entry.endTime - entry.startTime;
+			} else if (entry.startTime && !entry.endTime) {
+				// Active timer - preserve existing duration
+				// Don't recalculate
+			}
+
+			// Update action bar label if this is the active timer
+			const isActiveTimer = entry.startTime !== null && entry.endTime === null;
+			if (isActiveTimer && labelDisplay) {
+				if (labelInputParam) {
+					labelInputParam.value = entry.label;
+				} else {
+					labelDisplay.setText(entry.label);
 				}
+			}
+
+			// Update frontmatter
+			await this.updateFrontmatter(filePath);
+			
+			modal.close();
+			if (onSave) {
+				onSave();
+			}
+		};
+
+		cancelBtn.onclick = () => {
+			modal.close();
+		};
+
+		modal.open();
+	}
+
+	async showDeleteConfirmation(entryLabel: string): Promise<boolean> {
+		return new Promise((resolve) => {
+			const modal = new Modal(this.app);
+			modal.titleEl.setText('Delete Entry');
+			
+			const content = modal.contentEl;
+			content.empty();
+			content.createEl('p', { text: `Are you sure you want to delete "${entryLabel}"?` });
+			
+			const buttonContainer = content.createDiv({ cls: 'lapse-modal-buttons' });
+			const deleteBtn = buttonContainer.createEl('button', { text: 'Delete', cls: 'mod-warning' });
+			const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
+
+			deleteBtn.onclick = () => {
+				modal.close();
+				resolve(true);
 			};
+
+			cancelBtn.onclick = () => {
+				modal.close();
+				resolve(false);
+			};
+
+			modal.open();
 		});
 	}
 
@@ -1225,6 +1293,9 @@ class LapseSidebarView extends ItemView {
 			}
 		}
 
+		// Add pie chart section at the bottom
+		await this.renderPieChart(container as HTMLElement, todayStart);
+
 		// Set up refresh interval - always run to detect new timers
 		// Clear any existing interval first
 		if (this.refreshInterval) {
@@ -1280,6 +1351,170 @@ class LapseSidebarView extends ItemView {
 		
 		// If no more active timers, re-render to show "No active timers"
 		// (But keep the interval running to detect new timers)
+	}
+
+	async renderPieChart(container: HTMLElement, todayStart: number) {
+		// Calculate total time and project breakdown for today
+		const projectTimes = new Map<string, number>();
+		let totalTimeToday = 0;
+
+		// Get all entries from today (including active timers)
+		// First check entries already loaded in memory
+		for (const [filePath, pageData] of this.plugin.timeData) {
+			for (const entry of pageData.entries) {
+				if (entry.startTime && entry.startTime >= todayStart) {
+					let entryDuration = 0;
+					if (entry.endTime !== null) {
+						entryDuration = entry.duration;
+					} else if (entry.startTime !== null) {
+						// Active timer - include current elapsed time
+						entryDuration = entry.duration + (Date.now() - entry.startTime);
+					}
+
+					if (entryDuration > 0) {
+						totalTimeToday += entryDuration;
+						
+						// Get project for this entry
+						const project = await this.plugin.getProjectFromFrontmatter(filePath);
+						const projectName = project || 'No Project';
+						
+						const currentTime = projectTimes.get(projectName) || 0;
+						projectTimes.set(projectName, currentTime + entryDuration);
+					}
+				}
+			}
+		}
+
+		// Also check frontmatter for any files with entries that aren't in memory
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+		
+		for (const file of markdownFiles) {
+			const filePath = file.path;
+			
+			// Skip if already checked in memory
+			if (this.plugin.timeData.has(filePath)) {
+				continue;
+			}
+			
+			// Load entries from frontmatter
+			await this.plugin.loadEntriesFromFrontmatter(filePath);
+			
+			// Check for today's entries
+			const pageData = this.plugin.timeData.get(filePath);
+			if (pageData) {
+				for (const entry of pageData.entries) {
+					if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+						if (entry.duration > 0) {
+							totalTimeToday += entry.duration;
+							
+							// Get project for this entry
+							const project = await this.plugin.getProjectFromFrontmatter(filePath);
+							const projectName = project || 'No Project';
+							
+							const currentTime = projectTimes.get(projectName) || 0;
+							projectTimes.set(projectName, currentTime + entry.duration);
+						}
+					}
+				}
+			}
+		}
+
+		// Only show chart if there's time tracked today
+		if (totalTimeToday === 0) {
+			return;
+		}
+
+		// Create section container
+		const chartSection = container.createDiv({ cls: 'lapse-sidebar-chart-section' });
+		chartSection.createEl('h4', { text: 'Today\'s Summary', cls: 'lapse-sidebar-section-title' });
+
+		// Display total time in bigger text
+		const totalTimeDiv = chartSection.createDiv({ cls: 'lapse-sidebar-total-time' });
+		totalTimeDiv.setText(this.plugin.formatTimeAsHHMMSS(totalTimeToday));
+
+		// Create pie chart container
+		const chartContainer = chartSection.createDiv({ cls: 'lapse-sidebar-chart-container' });
+		
+		// Create SVG for pie chart
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.setAttribute('class', 'lapse-sidebar-pie-chart');
+		svg.setAttribute('width', '200');
+		svg.setAttribute('height', '200');
+		svg.setAttribute('viewBox', '0 0 200 200');
+		chartContainer.appendChild(svg);
+
+		// Generate colors for projects
+		const colors = [
+			'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
+			'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C',
+			'#3498DB', '#2ECC71', '#F39C12', '#16A085'
+		];
+
+		// Convert map to array and sort by time (descending)
+		const projectData = Array.from(projectTimes.entries())
+			.map(([name, time], index) => ({
+				name,
+				time,
+				color: colors[index % colors.length]
+			}))
+			.sort((a, b) => b.time - a.time);
+
+		// Draw pie chart
+		let currentAngle = -Math.PI / 2; // Start at top
+		const centerX = 100;
+		const centerY = 100;
+		const radius = 80;
+
+		projectData.forEach(({ name, time, color }) => {
+			const percentage = time / totalTimeToday;
+			const angle = percentage * 2 * Math.PI;
+
+			// Create path for this slice
+			const startAngle = currentAngle;
+			const endAngle = currentAngle + angle;
+
+			const x1 = centerX + radius * Math.cos(startAngle);
+			const y1 = centerY + radius * Math.sin(startAngle);
+			const x2 = centerX + radius * Math.cos(endAngle);
+			const y2 = centerY + radius * Math.sin(endAngle);
+
+			const largeArc = angle > Math.PI ? 1 : 0;
+
+			const pathData = [
+				`M ${centerX} ${centerY}`,
+				`L ${x1} ${y1}`,
+				`A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
+				'Z'
+			].join(' ');
+
+			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			path.setAttribute('d', pathData);
+			path.setAttribute('fill', color);
+			path.setAttribute('stroke', 'var(--background-primary)');
+			path.setAttribute('stroke-width', '2');
+			svg.appendChild(path);
+
+			currentAngle += angle;
+		});
+
+		// Create legend with labels
+		const legend = chartSection.createDiv({ cls: 'lapse-sidebar-chart-legend' });
+		
+		projectData.forEach(({ name, time, color }) => {
+			const legendItem = legend.createDiv({ cls: 'lapse-sidebar-legend-item' });
+			
+			// Color indicator
+			const colorBox = legendItem.createDiv({ cls: 'lapse-sidebar-legend-color' });
+			colorBox.style.backgroundColor = color;
+			
+			// Project name and time
+			const label = legendItem.createDiv({ cls: 'lapse-sidebar-legend-label' });
+			const nameSpan = label.createSpan({ text: name });
+			const timeSpan = label.createSpan({ 
+				text: this.plugin.formatTimeAsHHMMSS(time),
+				cls: 'lapse-sidebar-legend-time'
+			});
+		});
 	}
 
 	async refresh() {
