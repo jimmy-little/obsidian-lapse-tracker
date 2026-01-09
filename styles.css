@@ -8,80 +8,59 @@
     background: var(--background-primary);
 }
 
-/* Action Bar */
+/* Timer Widget Layout */
 
-.lapse-action-bar {
+.lapse-main-layout {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: 12px;
 }
 
 .lapse-timer-container {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 4px;
-}
-
-.lapse-timer-display {
-    font-size: 18px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-accent);
-    min-width: 110px;
-    text-align: center;
-    padding: 6px 0;
-    line-height: 1.5;
-}
-
-.lapse-adjust-buttons {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.lapse-btn-adjust {
-    padding: 4px 6px;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px;
     border: 1px solid var(--background-modifier-border);
-    border-radius: 4px;
-    background: var(--interactive-normal);
-    color: var(--text-normal);
-    cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 24px;
-    height: 24px;
+    border-radius: 6px;
+    background: var(--background-secondary);
+    width: 110px;
+    flex-shrink: 0;
 }
 
-.lapse-btn-adjust:hover:not(:disabled) {
-    background: var(--interactive-hover);
-}
-
-.lapse-btn-adjust:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-
-.lapse-input-container {
+.lapse-right-column {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    align-items: flex-start;
+    gap: 6px;
+    min-width: 0;
+}
+
+.lapse-top-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.lapse-timer-display {
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+    text-align: center;
+    line-height: 1.2;
 }
 
 .lapse-label-input {
-    width: 100%;
-    padding: 6px 12px;
-    padding-left: 0;
+    flex: 1;
+    padding: 6px 8px;
     border: 1px solid var(--background-modifier-border);
     border-radius: 4px;
     background: var(--background-primary);
     color: var(--text-normal);
-    font-size: 13px;
+    font-size: 14px;
+    font-weight: 500;
     font-family: inherit;
 }
 
@@ -90,61 +69,15 @@
     border-color: var(--interactive-accent);
 }
 
-.lapse-label-display {
-    width: 100%;
-    padding: 6px 12px;
-    padding-left: 0;
-    color: var(--text-normal);
-    font-size: 13px;
-    font-family: inherit;
-    line-height: 1.5;
-    text-align: left;
-}
-
 .lapse-label-display-running {
-    width: 100%;
-    padding: 6px 12px;
-    padding-left: 0;
-    color: var(--text-normal);
+    flex: 1;
+    padding: 6px 8px;
+    color: var(--text-accent);
     font-size: 18px;
-    font-weight: 700;
+    font-weight: 600;
     font-family: inherit;
     line-height: 1.5;
     text-align: left;
-}
-
-.lapse-summary {
-    display: flex;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 11px;
-    color: var(--text-muted);
-    padding: 2px 0;
-    width: 100%;
-}
-
-.lapse-summary-left {
-    text-align: left;
-    padding-left: 0;
-}
-
-.lapse-summary-right {
-    text-align: right;
-    padding-right: 0;
-}
-
-.lapse-buttons-container {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-start;
-    gap: 4px;
-}
-
-.lapse-today-label {
-    font-size: 11px;
-    color: var(--text-muted);
-    text-align: right;
 }
 
 .lapse-btn-play-stop,
@@ -161,8 +94,7 @@
     justify-content: center;
     min-width: 32px;
     height: 32px;
-    align-self: flex-start;
-    margin-top: 0;
+    flex-shrink: 0;
 }
 
 .lapse-btn-play-stop:hover,
@@ -170,14 +102,82 @@
     background: var(--interactive-hover);
 }
 
-.lapse-btn-play-stop {
-    background: var(--interactive-accent);
-    color: var(--text-on-accent);
-    border: none;
+/* Play button - green */
+.lapse-btn-play svg {
+    color: #22c55e;
+    stroke: #22c55e;
 }
 
-.lapse-btn-play-stop:hover {
-    opacity: 0.9;
+.lapse-btn-play:hover svg {
+    color: #16a34a;
+    stroke: #16a34a;
+}
+
+/* Stop button - red */
+.lapse-btn-stop svg {
+    color: #ef4444;
+    stroke: #ef4444;
+}
+
+.lapse-btn-stop:hover svg {
+    color: #dc2626;
+    stroke: #dc2626;
+}
+
+.lapse-adjust-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+}
+
+.lapse-btn-adjust {
+    flex: 1;
+    padding: 4px 6px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--interactive-normal);
+    color: var(--text-normal);
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.lapse-btn-adjust:hover:not(:disabled) {
+    background: var(--interactive-hover);
+}
+
+.lapse-btn-adjust:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.lapse-bottom-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.lapse-summary-left {
+    flex: 1;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-align: left;
+}
+
+.lapse-today-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-align: right;
+    flex-shrink: 0;
 }
 
 /* Collapsible Panel */
@@ -389,14 +389,68 @@
     text-align: center;
 }
 
+/* Header with refresh button */
+.lapse-sidebar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.lapse-sidebar-header h4 {
+    margin: 0;
+}
+
+.lapse-sidebar-refresh-btn {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.lapse-sidebar-refresh-btn:hover {
+    opacity: 1;
+}
+
+.lapse-sidebar-refresh-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Section header with toggle */
+.lapse-sidebar-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.lapse-sidebar-toggle-btn {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.lapse-sidebar-toggle-btn:hover {
+    opacity: 1;
+}
+
+.lapse-sidebar-toggle-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
 .lapse-sidebar-section-title {
     font-size: 13px;
     font-weight: 600;
     color: var(--text-normal);
-    margin-top: 16px;
-    margin-bottom: 8px;
-    padding-top: 12px;
-    border-top: 1px solid var(--background-modifier-border);
+    margin: 0;
 }
 
 .lapse-sidebar-list {

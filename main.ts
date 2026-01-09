@@ -18,6 +18,7 @@ interface LapseSettings {
 	timeAdjustMinutes: number;
 	firstDayOfWeek: number; // 0 = Sunday, 1 = Monday, etc.
 	excludedFolders: string[]; // Glob patterns for folders to exclude
+	showStatusBar: boolean; // Show active timer(s) in status bar
 }
 
 const DEFAULT_SETTINGS: LapseSettings = {
@@ -37,7 +38,8 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	defaultTagOnTimeEntries: '',
 	timeAdjustMinutes: 5,
 	firstDayOfWeek: 0, // 0 = Sunday
-	excludedFolders: [] // No folders excluded by default
+	excludedFolders: [], // No folders excluded by default
+	showStatusBar: true // Show active timers in status bar by default
 }
 
 interface TimeEntry {
@@ -58,7 +60,7 @@ interface LapseQuery {
 	to?: string;
 	period?: 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth';
 	groupBy?: 'project' | 'date' | 'tag';
-	display?: 'table' | 'summary';
+	display?: 'table' | 'summary' | 'chart';
 	chart?: 'bar' | 'pie' | 'none';
 }
 
@@ -85,6 +87,9 @@ export default class LapsePlugin extends Plugin {
 	cacheSaveTimeout: number | null = null; // Debounce cache saves
 	cacheLoading: boolean = false; // Track if cache is still loading
 	cacheLoaded: Promise<void> | null = null; // Promise to wait for cache loading
+	statusBarItem: HTMLElement | null = null; // Status bar element
+	statusBarUpdateInterval: number | null = null; // Interval for updating status bar
+	pendingSaves: Promise<void>[] = []; // Track pending save operations
 
 	async onload() {
 		const pluginStartTime = Date.now();
@@ -94,7 +99,6 @@ export default class LapsePlugin extends Plugin {
 
 		// Register the code block processors
 		this.registerMarkdownCodeBlockProcessor('lapse', this.processTimerCodeBlock.bind(this));
-		this.registerMarkdownCodeBlockProcessor('lapse-autostart', this.processAutoStartTimerCodeBlock.bind(this));
 		this.registerMarkdownCodeBlockProcessor('lapse-report', this.processReportCodeBlock.bind(this));
 
 		// Register the sidebar view
@@ -128,12 +132,73 @@ export default class LapsePlugin extends Plugin {
 			hotkeys: []
 		});
 
-		// Add command to insert auto-start timer
+		// Add command to insert timer and auto-start it
 		this.addCommand({
 			id: 'insert-lapse-autostart',
 			name: 'Add and start time tracker',
-			editorCallback: (editor) => {
-				editor.replaceSelection('```lapse-autostart\n\n```');
+			editorCallback: async (editor, view) => {
+				const file = view.file;
+				if (!file) return;
+				
+				const filePath = file.path;
+				
+				// Insert the lapse code block
+				editor.replaceSelection('```lapse\n\n```');
+				
+				// Create the timer entry in memory
+				if (!this.timeData.has(filePath)) {
+					this.timeData.set(filePath, {
+						entries: [],
+						totalTimeTracked: 0
+					});
+				}
+				
+				const pageData = this.timeData.get(filePath)!;
+				
+				// Check if there's already an active timer
+				const hasActiveTimer = pageData.entries.some(e => e.startTime !== null && e.endTime === null);
+				
+				if (!hasActiveTimer) {
+					// Get default label
+					const label = await this.getDefaultLabel(filePath);
+					
+					// Create new timer entry
+					const newEntry: TimeEntry = {
+						id: `${filePath}-${Date.now()}-${Math.random()}`,
+						label: label,
+						startTime: Date.now(),
+						endTime: null,
+						duration: 0,
+						isPaused: false,
+						tags: this.getDefaultTags()
+					};
+					
+					pageData.entries.push(newEntry);
+					
+					// Add default tag to note
+					await this.addDefaultTagToNote(filePath);
+					
+					// Update frontmatter
+					await this.updateFrontmatter(filePath);
+					
+					// Update sidebar
+					this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
+						if (leaf.view instanceof LapseSidebarView) {
+							leaf.view.refresh();
+						}
+					});
+				}
+				
+				// Switch to reading mode so the widget appears immediately
+				const activeLeaf = this.app.workspace.activeLeaf;
+				if (activeLeaf && activeLeaf.view.getViewType() === 'markdown') {
+					const state = activeLeaf.view.getState();
+					await activeLeaf.setViewState({
+						type: 'markdown',
+						// @ts-ignore - state has mode property
+						state: { ...state, mode: 'preview' }
+					});
+				}
 			},
 			hotkeys: []
 		});
@@ -203,6 +268,31 @@ export default class LapsePlugin extends Plugin {
 						}
 					});
 				}
+				
+				// Force widget to update by briefly toggling view mode
+				const activeLeaf = this.app.workspace.activeLeaf;
+				if (activeLeaf && activeLeaf.view.getViewType() === 'markdown') {
+					const state = activeLeaf.view.getState();
+					// @ts-ignore - state has mode property
+					const currentMode = state.mode || 'source';
+					const tempMode = currentMode === 'source' ? 'preview' : 'source';
+					
+					// Toggle away from current mode
+					await activeLeaf.setViewState({
+						type: 'markdown',
+						// @ts-ignore
+						state: { ...state, mode: tempMode }
+					});
+					
+					// Toggle back to original mode after 50ms
+					setTimeout(async () => {
+						await activeLeaf.setViewState({
+							type: 'markdown',
+							// @ts-ignore
+							state: { ...state, mode: currentMode }
+						});
+					}, 50);
+				}
 			}
 		});
 
@@ -227,8 +317,57 @@ export default class LapsePlugin extends Plugin {
 		// Settings tab
 		this.addSettingTab(new LapseSettingTab(this.app, this));
 
+		// Status bar setup
+		if (this.settings.showStatusBar) {
+			this.statusBarItem = this.addStatusBarItem();
+			this.statusBarItem.addClass('lapse-status-bar');
+			this.updateStatusBar();
+			// Update status bar every second
+			this.statusBarUpdateInterval = window.setInterval(() => {
+				this.updateStatusBar();
+			}, 1000);
+		}
+
 		const totalLoadTime = Date.now() - pluginStartTime;
 		console.log(`Lapse: Plugin loaded in ${totalLoadTime}ms`);
+	}
+
+	updateStatusBar() {
+		if (!this.settings.showStatusBar || !this.statusBarItem) {
+			return;
+		}
+
+		// Find all active timers
+		const activeTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
+		
+		for (const [filePath, pageData] of this.timeData) {
+			for (const entry of pageData.entries) {
+				if (entry.startTime !== null && entry.endTime === null) {
+					activeTimers.push({ filePath, entry });
+				}
+			}
+		}
+
+		if (activeTimers.length === 0) {
+			this.statusBarItem.setText('');
+			this.statusBarItem.hide();
+		} else if (activeTimers.length === 1) {
+			// Single timer: "{Time Entry Name} - {elapsed time}"
+			const { entry } = activeTimers[0];
+			const elapsed = entry.duration + (Date.now() - entry.startTime!);
+			const timeText = this.formatTimeForTimerDisplay(elapsed);
+			this.statusBarItem.setText(`${entry.label} - ${timeText}`);
+			this.statusBarItem.show();
+		} else {
+			// Multiple timers: "{2} timers - {total elapsed time}"
+			let totalElapsed = 0;
+			for (const { entry } of activeTimers) {
+				totalElapsed += entry.duration + (Date.now() - entry.startTime!);
+			}
+			const timeText = this.formatTimeForTimerDisplay(totalElapsed);
+			this.statusBarItem.setText(`${activeTimers.length} timers - ${timeText}`);
+			this.statusBarItem.show();
+		}
 	}
 
 	async loadEntriesFromFrontmatter(filePath: string): Promise<void> {
@@ -390,20 +529,32 @@ export default class LapsePlugin extends Plugin {
 				const frontmatter = match[1];
 				if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
 					// Tags already exist, check if our tag is there
-					const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]]+)\]?/);
+					const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]\n]+)\]?/);
 					if (tagsMatch) {
 						const existingTags = tagsMatch[1].split(',').map(t => t.trim().replace(/['"#]/g, ''));
 						if (existingTags.includes(tagName)) {
 							return; // Tag already exists
 						}
 					}
-					// Add tag to existing tags
+					// Add tag to existing tags - use multiline flag and match only on the tags line
 					const newContent = content.replace(
-						/(tags?:\s*\[?)([^\]]+)(\]?)/,
-						(match, prefix, tags, suffix) => {
-							const tagList = tags.split(',').map((t: string) => t.trim()).filter((t: string) => t);
-							tagList.push(tagName);
-							return `${prefix}${tagList.map((t: string) => `"${t}"`).join(', ')}${suffix}`;
+						/(^tags?:\s*)(.+?)$/m,
+						(match, prefix, existingTagsStr) => {
+							// Parse existing tags - handle both array [a, b] and single value formats
+							let tagList: string[] = [];
+							const arrayMatch = existingTagsStr.match(/\[(.+)\]/);
+							if (arrayMatch) {
+								// Array format: tags: [a, b]
+								tagList = arrayMatch[1].split(',').map((t: string) => t.trim().replace(/['"#]/g, '')).filter((t: string) => t);
+							} else {
+								// Single value or space-separated: tags: #meeting or tags: meeting
+								tagList = existingTagsStr.split(/[\s,]+/).map((t: string) => t.trim().replace(/['"#]/g, '')).filter((t: string) => t);
+							}
+							
+							if (!tagList.includes(tagName)) {
+								tagList.push(tagName);
+							}
+							return `${prefix}[${tagList.map((t: string) => `"${t}"`).join(', ')}]`;
 						}
 					);
 					await this.app.vault.modify(file, newContent);
@@ -647,45 +798,52 @@ export default class LapsePlugin extends Plugin {
 		// Build the container
 		const container = el.createDiv({ cls: 'lapse-container' });
 		
-		// Action bar
-		const actionBar = container.createDiv({ cls: 'lapse-action-bar' });
+		// Main layout wrapper with two columns
+		const mainLayout = container.createDiv({ cls: 'lapse-main-layout' });
 		
-		// Timer controls container
-		const timerContainer = actionBar.createDiv({ cls: 'lapse-timer-container' });
+		// LEFT COLUMN: Timer container (timer display + adjust buttons in bordered box)
+		const timerContainer = mainLayout.createDiv({ cls: 'lapse-timer-container' });
 		
 		// Timer display
 		const timerDisplay = timerContainer.createDiv({ cls: 'lapse-timer-display' });
 		timerDisplay.setText('--:--');
 		
-		// Adjust buttons container (under the timer)
+		// Adjust buttons container
 		const adjustButtonsContainer = timerContainer.createDiv({ cls: 'lapse-adjust-buttons' });
 		
-		// << button (adjust start time backward)
-		const adjustBackBtn = adjustButtonsContainer.createEl('button', { cls: 'lapse-btn-adjust' });
-		setIcon(adjustBackBtn, 'chevron-left');
+		// - button (adjust start time backward)
+		const adjustBackBtn = adjustButtonsContainer.createEl('button', { 
+			cls: 'lapse-btn-adjust',
+			text: `-${this.settings.timeAdjustMinutes}`
+		});
 		adjustBackBtn.disabled = !activeTimer;
 		
-		// >> button (adjust start time forward)
-		const adjustForwardBtn = adjustButtonsContainer.createEl('button', { cls: 'lapse-btn-adjust' });
-		setIcon(adjustForwardBtn, 'chevron-right');
+		// + button (adjust start time forward)
+		const adjustForwardBtn = adjustButtonsContainer.createEl('button', { 
+			cls: 'lapse-btn-adjust',
+			text: `+${this.settings.timeAdjustMinutes}`
+		});
 		adjustForwardBtn.disabled = !activeTimer;
 		
-		// Input container
-		const inputContainer = actionBar.createDiv({ cls: 'lapse-input-container' });
+		// RIGHT COLUMN: Label/buttons/counters
+		const rightColumn = mainLayout.createDiv({ cls: 'lapse-right-column' });
+		
+		// TOP LINE: Label/Input, Stop, Expand
+		const topLine = rightColumn.createDiv({ cls: 'lapse-top-line' });
 		
 		// Label display/input - use span when timer is running, input when editable
 		let labelDisplay: HTMLElement;
 		let labelInput: HTMLInputElement | null = null;
 		
 		if (activeTimer) {
-			// Show as plain text when timer is running - match counter style
-			labelDisplay = inputContainer.createEl('div', {
+			// Show as plain text when timer is running
+			labelDisplay = topLine.createEl('div', {
 				text: activeTimer.label,
 				cls: 'lapse-label-display-running'
 			});
 		} else {
 			// Show as input when editable
-			labelInput = inputContainer.createEl('input', {
+			labelInput = topLine.createEl('input', {
 				type: 'text',
 				placeholder: 'Timer label...',
 				cls: 'lapse-label-input'
@@ -693,26 +851,28 @@ export default class LapsePlugin extends Plugin {
 			labelDisplay = labelInput;
 		}
 
-		// Summary line under input
-		const summaryLine = inputContainer.createDiv({ cls: 'lapse-summary' });
-		const summaryLeft = summaryLine.createDiv({ cls: 'lapse-summary-left' });
-		const summaryRight = summaryLine.createDiv({ cls: 'lapse-summary-right' });
-		const todayLabel = summaryRight.createDiv({ cls: 'lapse-today-label' });
-
-		// Buttons container
-		const buttonsContainer = actionBar.createDiv({ cls: 'lapse-buttons-container' });
-
 		// Play/Stop button
-		const playStopBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-play-stop' });
+		const playStopBtn = topLine.createEl('button', { cls: 'lapse-btn-play-stop' });
 		if (activeTimer) {
 			setIcon(playStopBtn, 'square');
+			playStopBtn.classList.add('lapse-btn-stop');
 		} else {
 			setIcon(playStopBtn, 'play');
+			playStopBtn.classList.add('lapse-btn-play');
 		}
 
 		// Chevron button to toggle panel
-		const chevronBtn = buttonsContainer.createEl('button', { cls: 'lapse-btn-chevron' });
+		const chevronBtn = topLine.createEl('button', { cls: 'lapse-btn-chevron' });
 		setIcon(chevronBtn, 'chevron-down');
+
+		// BOTTOM LINE: Entry count | Today total
+		const bottomLine = rightColumn.createDiv({ cls: 'lapse-bottom-line' });
+		
+		// Entry count and total time (middle, flexible)
+		const summaryLeft = bottomLine.createDiv({ cls: 'lapse-summary-left' });
+		
+		// Today total (right-aligned)
+		const todayLabel = bottomLine.createDiv({ cls: 'lapse-today-label' });
 
 		// Helper function to calculate total time (including active timer if running)
 		const calculateTotalTime = (): number => {
@@ -758,7 +918,7 @@ export default class LapsePlugin extends Plugin {
 			// Update timer display
 			if (currentActiveTimer && currentActiveTimer.startTime) {
 				const elapsed = currentActiveTimer.duration + (Date.now() - currentActiveTimer.startTime);
-				timerDisplay.setText(this.formatTimeAsHHMMSS(elapsed));
+				timerDisplay.setText(this.formatTimeForTimerDisplay(elapsed));
 			} else {
 				timerDisplay.setText('--:--');
 			}
@@ -862,82 +1022,98 @@ export default class LapsePlugin extends Plugin {
 				// Refresh the UI - convert label display back to input
 				if (labelInput) {
 					labelInput.value = '';
-				} else if (labelDisplay) {
-					// Convert display to input
-					labelDisplay.remove();
-					labelInput = inputContainer.createEl('input', {
-						type: 'text',
-						placeholder: 'Timer label...',
-						cls: 'lapse-label-input'
-					}) as HTMLInputElement;
-					labelDisplay = labelInput;
+			} else if (labelDisplay) {
+				// Convert display to input
+				labelDisplay.remove();
+				// Insert input after timer display
+				labelInput = topLine.createEl('input', {
+					type: 'text',
+					placeholder: 'Timer label...',
+					cls: 'lapse-label-input'
+				}) as HTMLInputElement;
+				// Move input to correct position (after timer, before buttons)
+				const playBtn = topLine.querySelector('.lapse-btn-play-stop');
+				if (playBtn) {
+					topLine.insertBefore(labelInput, playBtn);
 				}
-				setIcon(playStopBtn, 'play');
-				updateDisplays(); // Update displays immediately
-				this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
+				labelDisplay = labelInput;
+			}
+			setIcon(playStopBtn, 'play');
+			playStopBtn.classList.remove('lapse-btn-stop');
+			playStopBtn.classList.add('lapse-btn-play');
+			updateDisplays(); // Update displays immediately
+			this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 
-				// Update sidebar
-				this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
-					if (leaf.view instanceof LapseSidebarView) {
-						leaf.view.refresh();
-					}
+			// Update sidebar
+			this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
+				if (leaf.view instanceof LapseSidebarView) {
+					leaf.view.refresh();
+				}
+			});
+		} else {
+			// Start a new timer
+			let label = '';
+			if (labelInput) {
+				label = labelInput.value.trim();
+			}
+			if (!label) {
+				// Get default label based on settings
+				label = await this.getDefaultLabel(filePath);
+			}
+			const newEntry: TimeEntry = {
+				id: `${filePath}-${Date.now()}-${Math.random()}`,
+				label: label,
+				startTime: Date.now(),
+				endTime: null,
+				duration: 0,
+				isPaused: false,
+				tags: this.getDefaultTags()
+			};
+			pageData.entries.push(newEntry);
+
+			// Start update interval
+			if (!updateInterval) {
+				updateInterval = window.setInterval(updateDisplays, 1000);
+			}
+
+			// Add default tag to note if configured
+			await this.addDefaultTagToNote(filePath);
+
+			// Update frontmatter
+			await this.updateFrontmatter(filePath);
+
+			// Update UI - convert input to display when timer starts
+			// Use the actual label value (from input or default) not just input.value
+			if (labelInput) {
+				labelInput.remove();
+				labelDisplay = topLine.createEl('div', {
+					text: label, // Use the resolved label value
+					cls: 'lapse-label-display-running'
 				});
+				// Move display to correct position (after timer, before buttons)
+				const playBtn = topLine.querySelector('.lapse-btn-play-stop');
+				if (playBtn) {
+					topLine.insertBefore(labelDisplay, playBtn);
+				}
+				labelInput = null;
+			} else if (labelDisplay) {
+				// Update existing display - just change the text
+				labelDisplay.setText(label);
 			} else {
-				// Start a new timer
-				let label = '';
-				if (labelInput) {
-					label = labelInput.value.trim();
+				// Create display if it doesn't exist
+				labelDisplay = topLine.createEl('div', {
+					text: label,
+					cls: 'lapse-label-display-running'
+				});
+				// Move display to correct position
+				const playBtn = topLine.querySelector('.lapse-btn-play-stop');
+				if (playBtn) {
+					topLine.insertBefore(labelDisplay, playBtn);
 				}
-				if (!label) {
-					// Get default label based on settings
-					label = await this.getDefaultLabel(filePath);
-				}
-				const newEntry: TimeEntry = {
-					id: `${filePath}-${Date.now()}-${Math.random()}`,
-					label: label,
-					startTime: Date.now(),
-					endTime: null,
-					duration: 0,
-					isPaused: false,
-					tags: this.getDefaultTags()
-				};
-				pageData.entries.push(newEntry);
-
-				// Start update interval
-				if (!updateInterval) {
-					updateInterval = window.setInterval(updateDisplays, 1000);
-				}
-
-				// Add default tag to note if configured
-				await this.addDefaultTagToNote(filePath);
-
-				// Update frontmatter
-				await this.updateFrontmatter(filePath);
-
-				// Update UI - convert input to display when timer starts
-				// Use the actual label value (from input or default) not just input.value
-				if (labelInput) {
-					labelInput.remove();
-					labelDisplay = inputContainer.createEl('div', {
-						text: label, // Use the resolved label value
-						cls: 'lapse-label-display-running'
-					});
-					labelInput = null;
-				} else if (labelDisplay) {
-					// Update existing display - replace with new element with correct class
-					labelDisplay.remove();
-					labelDisplay = inputContainer.createEl('div', {
-						text: label, // Use the resolved label value
-						cls: 'lapse-label-display-running'
-					});
-				} else {
-					// Create display if it doesn't exist
-					labelDisplay = inputContainer.createEl('div', {
-						text: label,
-						cls: 'lapse-label-display-running'
-					});
-				}
-				setIcon(playStopBtn, 'square');
+			}
+			setIcon(playStopBtn, 'square');
+			playStopBtn.classList.remove('lapse-btn-play');
+			playStopBtn.classList.add('lapse-btn-stop');
 				updateDisplays(); // Update displays immediately
 				this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 
@@ -966,56 +1142,6 @@ export default class LapsePlugin extends Plugin {
 		};
 	}
 
-	async processAutoStartTimerCodeBlock(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
-		const filePath = ctx.sourcePath;
-
-		// Load existing entries from frontmatter
-		await this.loadEntriesFromFrontmatter(filePath);
-
-		// Get or create page data
-		if (!this.timeData.has(filePath)) {
-			this.timeData.set(filePath, {
-				entries: [],
-				totalTimeTracked: 0
-			});
-		}
-
-		const pageData = this.timeData.get(filePath)!;
-
-		// Check if there's already an active timer
-		const activeTimer = pageData.entries.find(e => e.startTime !== null && e.endTime === null);
-
-		// If no active timer, auto-start one
-		if (!activeTimer) {
-			const label = await this.getDefaultLabel(filePath);
-			const newEntry: TimeEntry = {
-				id: `${filePath}-${Date.now()}-${Math.random()}`,
-				label: label,
-				startTime: Date.now(),
-				endTime: null,
-				duration: 0,
-				isPaused: false,
-				tags: this.getDefaultTags()
-			};
-			pageData.entries.push(newEntry);
-
-			// Add default tag to note
-			await this.addDefaultTagToNote(filePath);
-
-			// Update frontmatter
-			await this.updateFrontmatter(filePath);
-
-			// Update sidebar
-			this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
-				if (leaf.view instanceof LapseSidebarView) {
-					leaf.view.refresh();
-				}
-			});
-		}
-
-		// Now render the normal timer UI (which will show the active timer)
-		await this.processTimerCodeBlock(source, el, ctx);
-	}
 
 	async processReportCodeBlock(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
 		// Parse the query
@@ -1046,6 +1172,9 @@ export default class LapsePlugin extends Plugin {
 		
 		if (query.display === 'summary') {
 			await this.renderReportSummary(container, groupedData, query);
+		} else if (query.display === 'chart') {
+			// Only show chart and legend, no table or summary
+			await this.renderReportChartOnly(container, groupedData, query);
 		} else {
 			// Default to table
 			await this.renderReportTable(container, groupedData, query);
@@ -1103,8 +1232,8 @@ export default class LapsePlugin extends Plugin {
 					}
 					break;
 				case 'display':
-					if (['table', 'summary'].includes(value.toLowerCase())) {
-						query.display = value.toLowerCase() as 'table' | 'summary';
+					if (['table', 'summary', 'chart'].includes(value.toLowerCase())) {
+						query.display = value.toLowerCase() as 'table' | 'summary' | 'chart';
 					}
 					break;
 				case 'chart':
@@ -1471,6 +1600,33 @@ export default class LapsePlugin extends Plugin {
 			case 'date': return 'Date';
 			case 'tag': return 'Tag';
 			default: return 'Group';
+		}
+	}
+
+	async renderReportChartOnly(container: HTMLElement, groupedData: Map<string, any>, query: LapseQuery) {
+		// Calculate total time
+		let totalTime = 0;
+		groupedData.forEach(group => {
+			totalTime += group.totalTime;
+		});
+		
+		// Sort groups by time descending
+		const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
+		
+		// Only render chart if chart type is specified and not 'none'
+		if (query.chart && query.chart !== 'none' && sortedGroups.length > 0) {
+			const chartContainer = container.createDiv({ cls: 'lapse-report-chart-container' });
+			const chartData = sortedGroups.map(([group, data]) => ({
+				group,
+				totalTime: data.totalTime
+			}));
+			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+		} else {
+			// If no chart specified or 'none', show a message
+			container.createEl('p', { 
+				text: 'Please specify a chart type (chart: pie or chart: bar)', 
+				cls: 'lapse-report-error' 
+			});
 		}
 	}
 
@@ -1889,6 +2045,21 @@ export default class LapsePlugin extends Plugin {
 		return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 	}
 
+	formatTimeForTimerDisplay(milliseconds: number): string {
+		const totalSeconds = Math.floor(milliseconds / 1000);
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+		
+		if (hours > 0) {
+			// Show hours without leading zero: 1:00:00, 12:34:56
+			return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		} else {
+			// No hours, just MM:SS
+			return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		}
+	}
+
 	async updateFrontmatter(filePath: string) {
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (!file || !(file instanceof TFile)) return;
@@ -1897,9 +2068,7 @@ export default class LapsePlugin extends Plugin {
 		if (!pageData) return;
 
 		const content = await this.app.vault.read(file);
-		const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
-		const match = content.match(frontmatterRegex);
-
+		
 		// Calculate startTime (earliest start from all entries that have started)
 		const startedEntries = pageData.entries.filter(e => e.startTime !== null);
 		const startTime = startedEntries.length > 0 
@@ -1929,126 +2098,91 @@ export default class LapsePlugin extends Plugin {
 		// Format totalTimeTracked as hh:mm:ss
 		const totalTimeFormatted = this.formatTimeAsHHMMSS(totalTimeTracked);
 
-		let newContent: string;
+		// Get configured keys
+		const startTimeKey = this.settings.startTimeKey;
+		const endTimeKey = this.settings.endTimeKey;
+		const entriesKey = this.settings.entriesKey;
+		const totalTimeKey = this.settings.totalTimeKey;
 
-		if (match) {
-			// Parse existing frontmatter and update/overwrite our fields
-			const existingFrontmatter = match[1];
-			const lines = existingFrontmatter.split('\n');
+		// Build the Lapse frontmatter section as a string
+		let lapseFrontmatter = '';
+		
+		if (startTime !== null) {
+			lapseFrontmatter += `${startTimeKey}: ${new Date(startTime).toISOString()}\n`;
+		}
+		if (endTime !== null) {
+			lapseFrontmatter += `${endTimeKey}: ${new Date(endTime).toISOString()}\n`;
+		}
+		
+		// Add entries as YAML array
+		if (entries.length > 0) {
+			lapseFrontmatter += `${entriesKey}:\n`;
+			entries.forEach(entry => {
+				const escapedLabel = entry.label.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				lapseFrontmatter += `  - label: "${escapedLabel}"\n`;
+				if (entry.start) {
+					lapseFrontmatter += `    start: ${entry.start}\n`;
+				}
+				if (entry.end) {
+					lapseFrontmatter += `    end: ${entry.end}\n`;
+				}
+				lapseFrontmatter += `    duration: ${entry.duration}\n`;
+				if (entry.tags && entry.tags.length > 0) {
+					lapseFrontmatter += `    tags: [${entry.tags.map((t: string) => `"${t}"`).join(', ')}]\n`;
+				}
+			});
+		} else {
+			lapseFrontmatter += `${entriesKey}: []\n`;
+		}
+		
+		lapseFrontmatter += `${totalTimeKey}: "${totalTimeFormatted}"\n`;
 
-			// Remove existing lapse-related fields using configured keys
-			const startTimeKey = this.settings.startTimeKey;
-			const endTimeKey = this.settings.endTimeKey;
-			const entriesKey = this.settings.entriesKey;
-			const totalTimeKey = this.settings.totalTimeKey;
+		// Check if frontmatter exists
+		const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+		
+		if (frontmatterMatch) {
+			const existingFM = frontmatterMatch[1];
+			const lines = existingFM.split('\n');
 			
-			// Track if we're inside the entries array block
-			let insideEntries = false;
-			const filteredLines: string[] = [];
-			
-			for (const line of lines) {
+			// Remove old Lapse entries by filtering out matching lines and their sub-items
+			let inLapseArray = false;
+			const filteredLines = lines.filter(line => {
 				const trimmed = line.trim();
 				
-				// Check if we're entering entries block
+				// Check if entering lapse entries array
 				if (trimmed.startsWith(`${entriesKey}:`)) {
-					insideEntries = true;
-					continue; // Skip this line
+					inLapseArray = true;
+					return false;
 				}
 				
-				// If we're inside entries, skip array items and their properties
-				if (insideEntries) {
-					// Check if this line is still part of the array (indented)
-					if (line.match(/^\s+/)) {
-						continue; // Skip indented lines (array items)
+				// Skip lines inside lapse entries array
+				if (inLapseArray) {
+					if (line.match(/^\s+(-|\w+:)/)) {
+						return false; // Still inside array
 					}
-					// If we hit a non-indented line, we've exited the array
-					insideEntries = false;
+					inLapseArray = false; // Exited array
 				}
 				
-				// Skip our top-level fields using configured keys
+				// Skip other Lapse fields
 				if (trimmed.startsWith(`${startTimeKey}:`) ||
 				    trimmed.startsWith(`${endTimeKey}:`) ||
 				    trimmed.startsWith(`${totalTimeKey}:`)) {
-					continue;
+					return false;
 				}
 				
-				// Keep all other lines
-				filteredLines.push(line);
-			}
-
-			// Add our fields using configured keys
-			if (startTime !== null) {
-				filteredLines.push(`${startTimeKey}: ${new Date(startTime).toISOString()}`);
-			}
-			if (endTime !== null) {
-				filteredLines.push(`${endTimeKey}: ${new Date(endTime).toISOString()}`);
-			}
+				return true;
+			});
 			
-			// Add entries as YAML array using configured key
-			if (entries.length > 0) {
-				filteredLines.push(`${entriesKey}:`);
-				entries.forEach(entry => {
-					filteredLines.push(`  - label: "${entry.label.replace(/"/g, '\\"')}"`);
-					if (entry.start) {
-						filteredLines.push(`    start: ${entry.start}`);
-					}
-					if (entry.end) {
-						filteredLines.push(`    end: ${entry.end}`);
-					}
-					filteredLines.push(`    duration: ${entry.duration}`);
-					if (entry.tags && entry.tags.length > 0) {
-						filteredLines.push(`    tags: [${entry.tags.map((t: string) => `"${t}"`).join(', ')}]`);
-					}
-				});
-			} else {
-				filteredLines.push(`${entriesKey}: []`);
-			}
+			// Rebuild frontmatter with existing fields + new Lapse fields
+			const newFM = filteredLines.join('\n') + '\n' + lapseFrontmatter;
+			const newContent = content.replace(/^---\n[\s\S]*?\n---/, `---\n${newFM}---`);
 			
-			filteredLines.push(`${totalTimeKey}: "${totalTimeFormatted}"`);
-
-			newContent = content.replace(frontmatterRegex, `---\n${filteredLines.join('\n')}\n---`);
+			await this.app.vault.modify(file, newContent);
 		} else {
-			// Create new frontmatter using configured keys
-			const startTimeKey = this.settings.startTimeKey;
-			const endTimeKey = this.settings.endTimeKey;
-			const entriesKey = this.settings.entriesKey;
-			const totalTimeKey = this.settings.totalTimeKey;
-			
-			const frontmatterLines: string[] = [];
-			
-			if (startTime !== null) {
-				frontmatterLines.push(`${startTimeKey}: ${new Date(startTime).toISOString()}`);
-			}
-			if (endTime !== null) {
-				frontmatterLines.push(`${endTimeKey}: ${new Date(endTime).toISOString()}`);
-			}
-			
-			if (entries.length > 0) {
-				frontmatterLines.push(`${entriesKey}:`);
-				entries.forEach(entry => {
-					frontmatterLines.push(`  - label: "${entry.label.replace(/"/g, '\\"')}"`);
-					if (entry.start) {
-						frontmatterLines.push(`    start: ${entry.start}`);
-					}
-					if (entry.end) {
-						frontmatterLines.push(`    end: ${entry.end}`);
-					}
-					frontmatterLines.push(`    duration: ${entry.duration}`);
-					if (entry.tags && entry.tags.length > 0) {
-						frontmatterLines.push(`    tags: [${entry.tags.map(t => `"${t}"`).join(', ')}]`);
-					}
-				});
-			} else {
-				frontmatterLines.push(`${entriesKey}: []`);
-			}
-			
-			frontmatterLines.push(`${totalTimeKey}: "${totalTimeFormatted}"`);
-			
-			const frontmatter = `---\n${frontmatterLines.join('\n')}\n---\n\n`;
-			newContent = frontmatter + content;
+			// No frontmatter exists, create new
+			const newContent = `---\n${lapseFrontmatter}---\n\n${content}`;
+			await this.app.vault.modify(file, newContent);
 		}
-
-		await this.app.vault.modify(file, newContent);
 		
 		// Invalidate cache for this file since we just modified it
 		this.invalidateCacheForFile(filePath);
@@ -2136,7 +2270,29 @@ export default class LapsePlugin extends Plugin {
 		return activeTimers;
 	}
 
-	onunload() {
+	async onunload() {
+		// Clean up status bar interval
+		if (this.statusBarUpdateInterval) {
+			window.clearInterval(this.statusBarUpdateInterval);
+			this.statusBarUpdateInterval = null;
+		}
+		
+		// Wait for any pending cache saves to complete
+		if (this.pendingSaves.length > 0) {
+			console.log(`Lapse: Waiting for ${this.pendingSaves.length} pending save(s) to complete...`);
+			await Promise.all(this.pendingSaves);
+		}
+		
+		// If there's a debounced save pending, trigger it immediately
+		if (this.cacheSaveTimeout) {
+			clearTimeout(this.cacheSaveTimeout);
+			await this.saveData({
+				...this.settings,
+				entryCache: this.entryCache
+			});
+			this.cacheSaveTimeout = null;
+		}
+		
 		console.log('Unloading Lapse plugin');
 	}
 
@@ -2184,7 +2340,7 @@ export default class LapsePlugin extends Plugin {
 				this.cacheLoading = true;
 				// Load cache asynchronously without blocking
 				this.cacheLoaded = new Promise<void>((resolve) => {
-					setTimeout(() => {
+					setTimeout(async () => {
 						this.entryCache = data.entryCache;
 						this.cacheLoading = false;
 						const loadTime = Date.now() - startTime;
@@ -2192,7 +2348,7 @@ export default class LapsePlugin extends Plugin {
 						
 						// Save pruned cache if we pruned anything
 						if (finalCacheSize < cacheSize) {
-							this.saveCache();
+							await this.saveCache();
 						}
 						
 						resolve();
@@ -2219,14 +2375,30 @@ export default class LapsePlugin extends Plugin {
 			clearTimeout(this.cacheSaveTimeout);
 		}
 
-		this.cacheSaveTimeout = window.setTimeout(async () => {
-			// Save just the cache without triggering full settings save
-			await this.saveData({
-				...this.settings,
-				entryCache: this.entryCache
-			});
-			this.cacheSaveTimeout = null;
-		}, 2000); // Wait 2 seconds before saving
+		// Create a promise that resolves when the save completes
+		const savePromise = new Promise<void>((resolve) => {
+			this.cacheSaveTimeout = window.setTimeout(async () => {
+				try {
+					// Save just the cache without triggering full settings save
+					await this.saveData({
+						...this.settings,
+						entryCache: this.entryCache
+					});
+				} finally {
+					this.cacheSaveTimeout = null;
+					// Remove from pending saves
+					const index = this.pendingSaves.indexOf(savePromise);
+					if (index > -1) {
+						this.pendingSaves.splice(index, 1);
+					}
+					resolve();
+				}
+			}, 2000); // Wait 2 seconds before saving
+		});
+
+		// Track this save operation
+		this.pendingSaves.push(savePromise);
+		return savePromise;
 	}
 
 	invalidateCacheForFile(filePath: string) {
@@ -2285,6 +2457,8 @@ class LapseSidebarView extends ItemView {
 	plugin: LapsePlugin;
 	refreshInterval: number | null = null;
 	timeDisplays: Map<string, HTMLElement> = new Map(); // Map of entry ID to time display element
+	showTodayEntries: boolean = true; // Toggle for showing/hiding individual entries
+	refreshCounter: number = 0; // Counter for periodic full refreshes
 
 	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
 		super(leaf);
@@ -2312,7 +2486,20 @@ class LapseSidebarView extends ItemView {
 		container.empty();
 		this.timeDisplays.clear();
 		
-		container.createEl('h4', { text: 'Activity' });
+		// Header with title and refresh button
+		const header = container.createDiv({ cls: 'lapse-sidebar-header' });
+		header.createEl('h4', { text: 'Activity' });
+		
+		const refreshBtn = header.createEl('button', { 
+			cls: 'lapse-sidebar-refresh-btn clickable-icon',
+			attr: { 'aria-label': 'Refresh' }
+		});
+		setIcon(refreshBtn, 'refresh-cw');
+		refreshBtn.onclick = async () => {
+			// Force reload of all entries in view
+			this.plugin.timeData.clear();
+			await this.render();
+		};
 
 		// Get active timers from memory only (not all files) for faster rendering
 		const activeTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
@@ -2388,6 +2575,7 @@ class LapseSidebarView extends ItemView {
 		
 		const todayEntries: Array<{ filePath: string; entry: TimeEntry; startTime: number }> = [];
 		
+		// First, get entries from memory
 		this.plugin.timeData.forEach((pageData, filePath) => {
 			pageData.entries.forEach(entry => {
 				if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
@@ -2395,6 +2583,32 @@ class LapseSidebarView extends ItemView {
 				}
 			});
 		});
+		
+		// Also check all files using cache for fast access
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+		
+		for (const file of markdownFiles) {
+			const filePath = file.path;
+			
+			// Skip excluded folders
+			if (this.plugin.isFileExcluded(filePath)) {
+				continue;
+			}
+			
+			// Skip if already checked in memory
+			if (this.plugin.timeData.has(filePath)) {
+				continue;
+			}
+			
+			// Use cached data or load if needed
+			const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
+			
+			for (const entry of fileEntries) {
+				if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+					todayEntries.push({ filePath, entry, startTime: entry.startTime });
+				}
+			}
+		}
 		
 		// Group entries by filePath
 		const entriesByNote = new Map<string, Array<{ entry: TimeEntry; startTime: number }>>();
@@ -2422,7 +2636,20 @@ class LapseSidebarView extends ItemView {
 		
 		// Display today's entries grouped by note
 		if (noteGroups.length > 0) {
-			container.createEl('h4', { text: "Today's Entries", cls: 'lapse-sidebar-section-title' });
+			// Section header with toggle button
+			const sectionHeader = container.createDiv({ cls: 'lapse-sidebar-section-header' });
+			sectionHeader.createEl('h4', { text: "Today's Entries", cls: 'lapse-sidebar-section-title' });
+			
+			const toggleBtn = sectionHeader.createEl('button', {
+				cls: 'lapse-sidebar-toggle-btn clickable-icon',
+				attr: { 'aria-label': this.showTodayEntries ? 'Hide entries' : 'Show entries' }
+			});
+			setIcon(toggleBtn, this.showTodayEntries ? 'chevron-down' : 'chevron-right');
+			toggleBtn.onclick = () => {
+				this.showTodayEntries = !this.showTodayEntries;
+				this.render();
+			};
+			
 			const todayList = container.createEl('ul', { cls: 'lapse-sidebar-list' });
 			
 			for (const { filePath, entries, totalTime } of noteGroups) {
@@ -2469,14 +2696,16 @@ class LapseSidebarView extends ItemView {
 					secondLine.createSpan({ text: project, cls: 'lapse-sidebar-project' });
 				}
 				
-				// List individual entries below
-				const entriesList = item.createDiv({ cls: 'lapse-sidebar-entries-list' });
-				entries.forEach(({ entry }) => {
-					const entryLine = entriesList.createDiv({ cls: 'lapse-sidebar-entry-line' });
-					const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
-					entryLine.createSpan({ text: entry.label, cls: 'lapse-sidebar-entry-label' });
-					entryLine.createSpan({ text: entryTime, cls: 'lapse-sidebar-entry-time' });
-				});
+				// List individual entries below (only if toggled on)
+				if (this.showTodayEntries) {
+					const entriesList = item.createDiv({ cls: 'lapse-sidebar-entries-list' });
+					entries.forEach(({ entry }) => {
+						const entryLine = entriesList.createDiv({ cls: 'lapse-sidebar-entry-line' });
+						const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
+						entryLine.createSpan({ text: entry.label, cls: 'lapse-sidebar-entry-label' });
+						entryLine.createSpan({ text: entryTime, cls: 'lapse-sidebar-entry-time' });
+					});
+				}
 			}
 		}
 
@@ -2489,13 +2718,27 @@ class LapseSidebarView extends ItemView {
 			clearInterval(this.refreshInterval);
 		}
 		
-		// Always set up interval to check for new/stopped timers and update displays
+		// Check more frequently (1 second) to catch changes faster
 		this.refreshInterval = window.setInterval(() => {
 			this.updateTimers().catch(err => console.error('Error updating timers:', err));
-		}, 2000);
+		}, 1000);
 	}
 
 	async updateTimers() {
+		// Increment refresh counter
+		this.refreshCounter++;
+		
+		// Every 10 seconds (10 calls at 1 second interval), do a full refresh to catch metadata changes
+		if (this.refreshCounter >= 10) {
+			this.refreshCounter = 0;
+			// Clear cache for files that have active entries to reload fresh metadata
+			this.plugin.timeData.forEach((pageData, filePath) => {
+				this.plugin.invalidateCacheForFile(filePath);
+			});
+			await this.render();
+			return;
+		}
+		
 		// Get current active timers from memory only (don't scan all files)
 		const currentActiveTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
 		this.plugin.timeData.forEach((pageData, filePath) => {
@@ -2851,6 +3094,39 @@ class LapseSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.hideTimestampsInViews = value;
 					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Show status bar')
+			.setDesc('Display active timer(s) in the status bar at the bottom of Obsidian')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.showStatusBar)
+				.onChange(async (value) => {
+					this.plugin.settings.showStatusBar = value;
+					await this.plugin.saveSettings();
+					
+					// Update status bar visibility
+					if (value) {
+						if (!this.plugin.statusBarItem) {
+							this.plugin.statusBarItem = this.plugin.addStatusBarItem();
+							this.plugin.statusBarItem.addClass('lapse-status-bar');
+						}
+						this.plugin.updateStatusBar();
+						if (!this.plugin.statusBarUpdateInterval) {
+							this.plugin.statusBarUpdateInterval = window.setInterval(() => {
+								this.plugin.updateStatusBar();
+							}, 1000);
+						}
+					} else {
+						if (this.plugin.statusBarUpdateInterval) {
+							window.clearInterval(this.plugin.statusBarUpdateInterval);
+							this.plugin.statusBarUpdateInterval = null;
+						}
+						if (this.plugin.statusBarItem) {
+							this.plugin.statusBarItem.setText('');
+							this.plugin.statusBarItem.hide();
+						}
+					}
 				}));
 
 		new Setting(containerEl)

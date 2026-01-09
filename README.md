@@ -40,14 +40,9 @@ Add a time tracker to any note using a code block:
 ```
 ````
 
-### Auto-Start Timer
+### Quick Start Timer
 
-Create a timer that automatically starts when the note is opened (only if no timer is running):
-
-````markdown
-```lapse-autostart
-```
-````
+Use the **"Add and start time tracker"** command from the command palette to insert a timer and immediately start tracking. This creates a `lapse` block and starts the timer in one action.
 
 ### Timer Controls
 
@@ -82,6 +77,7 @@ chart: pie
 **Display Options:**
 - `display: table` - Show grouped table with entry counts (default)
 - `display: summary` - Show only totals and breakdown
+- `display: chart` - Show only chart and legend (no table or summary)
 
 **Grouping:**
 - `group-by: project` - Group by project (default)
@@ -144,6 +140,15 @@ display: table
 ```
 ````
 
+**Chart only (no table or summary):**
+````markdown
+```lapse-report
+period: thisWeek
+display: chart
+chart: pie
+```
+````
+
 ### Views & Commands
 
 **Sidebar Views:**
@@ -152,7 +157,7 @@ display: table
 
 **Available Commands:**
 - `Lapse: Add time tracker` - Insert a `lapse` code block at cursor
-- `Lapse: Add and start time tracker` - Insert a `lapse-autostart` code block at cursor
+- `Lapse: Add and start time tracker` - Insert a `lapse` code block and immediately start the timer
 - `Lapse: Quick start timer` - Toggle timer in current note (start/stop)
 - `Lapse: Show activity` - Open Activity sidebar
 - `Lapse: Show time reports` - Open Time Reports view
