@@ -749,6 +749,8 @@ ${content}`;
     const container = el.createDiv({ cls: "lapse-report-container" });
     if (query.display === "summary") {
       await this.renderReportSummary(container, groupedData, query);
+    } else if (query.display === "chart") {
+      await this.renderReportChartOnly(container, groupedData, query);
     } else {
       await this.renderReportTable(container, groupedData, query);
     }
@@ -803,7 +805,7 @@ ${content}`;
           }
           break;
         case "display":
-          if (["table", "summary"].includes(value.toLowerCase())) {
+          if (["table", "summary", "chart"].includes(value.toLowerCase())) {
             query.display = value.toLowerCase();
           }
           break;
@@ -1050,6 +1052,26 @@ ${content}`;
         return "Tag";
       default:
         return "Group";
+    }
+  }
+  async renderReportChartOnly(container, groupedData, query) {
+    let totalTime = 0;
+    groupedData.forEach((group) => {
+      totalTime += group.totalTime;
+    });
+    const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
+    if (query.chart && query.chart !== "none" && sortedGroups.length > 0) {
+      const chartContainer = container.createDiv({ cls: "lapse-report-chart-container" });
+      const chartData = sortedGroups.map(([group, data]) => ({
+        group,
+        totalTime: data.totalTime
+      }));
+      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+    } else {
+      container.createEl("p", {
+        text: "Please specify a chart type (chart: pie or chart: bar)",
+        cls: "lapse-report-error"
+      });
     }
   }
   async renderReportChart(container, data, totalTime, chartType) {
@@ -1674,11 +1696,15 @@ ${frontmatterLines.join("\n")}
   }
 };
 var LapseSidebarView = class extends import_obsidian.ItemView {
-  // Map of entry ID to time display element
+  // Counter for periodic full refreshes
   constructor(leaf, plugin) {
     super(leaf);
     this.refreshInterval = null;
     this.timeDisplays = /* @__PURE__ */ new Map();
+    // Map of entry ID to time display element
+    this.showTodayEntries = true;
+    // Toggle for showing/hiding individual entries
+    this.refreshCounter = 0;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1698,7 +1724,17 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     const container = this.containerEl.children[1];
     container.empty();
     this.timeDisplays.clear();
-    container.createEl("h4", { text: "Activity" });
+    const header = container.createDiv({ cls: "lapse-sidebar-header" });
+    header.createEl("h4", { text: "Activity" });
+    const refreshBtn = header.createEl("button", {
+      cls: "lapse-sidebar-refresh-btn clickable-icon",
+      attr: { "aria-label": "Refresh" }
+    });
+    (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
+    refreshBtn.onclick = async () => {
+      this.plugin.timeData.clear();
+      await this.render();
+    };
     const activeTimers = [];
     this.plugin.timeData.forEach((pageData, filePath) => {
       pageData.entries.forEach((entry) => {
@@ -1755,6 +1791,22 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
         }
       });
     });
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    for (const file of markdownFiles) {
+      const filePath = file.path;
+      if (this.plugin.isFileExcluded(filePath)) {
+        continue;
+      }
+      if (this.plugin.timeData.has(filePath)) {
+        continue;
+      }
+      const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
+      for (const entry of fileEntries) {
+        if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+          todayEntries.push({ filePath, entry, startTime: entry.startTime });
+        }
+      }
+    }
     const entriesByNote = /* @__PURE__ */ new Map();
     todayEntries.forEach(({ filePath, entry, startTime }) => {
       if (!entriesByNote.has(filePath)) {
@@ -1772,7 +1824,17 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     });
     noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
     if (noteGroups.length > 0) {
-      container.createEl("h4", { text: "Today's Entries", cls: "lapse-sidebar-section-title" });
+      const sectionHeader = container.createDiv({ cls: "lapse-sidebar-section-header" });
+      sectionHeader.createEl("h4", { text: "Today's Entries", cls: "lapse-sidebar-section-title" });
+      const toggleBtn = sectionHeader.createEl("button", {
+        cls: "lapse-sidebar-toggle-btn clickable-icon",
+        attr: { "aria-label": this.showTodayEntries ? "Hide entries" : "Show entries" }
+      });
+      (0, import_obsidian.setIcon)(toggleBtn, this.showTodayEntries ? "chevron-down" : "chevron-right");
+      toggleBtn.onclick = () => {
+        this.showTodayEntries = !this.showTodayEntries;
+        this.render();
+      };
       const todayList = container.createEl("ul", { cls: "lapse-sidebar-list" });
       for (const { filePath, entries, totalTime } of noteGroups) {
         const item = todayList.createEl("li", { cls: "lapse-sidebar-note-group" });
@@ -1801,13 +1863,15 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
           const secondLine = item.createDiv({ cls: "lapse-sidebar-second-line" });
           secondLine.createSpan({ text: project, cls: "lapse-sidebar-project" });
         }
-        const entriesList = item.createDiv({ cls: "lapse-sidebar-entries-list" });
-        entries.forEach(({ entry }) => {
-          const entryLine = entriesList.createDiv({ cls: "lapse-sidebar-entry-line" });
-          const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
-          entryLine.createSpan({ text: entry.label, cls: "lapse-sidebar-entry-label" });
-          entryLine.createSpan({ text: entryTime, cls: "lapse-sidebar-entry-time" });
-        });
+        if (this.showTodayEntries) {
+          const entriesList = item.createDiv({ cls: "lapse-sidebar-entries-list" });
+          entries.forEach(({ entry }) => {
+            const entryLine = entriesList.createDiv({ cls: "lapse-sidebar-entry-line" });
+            const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
+            entryLine.createSpan({ text: entry.label, cls: "lapse-sidebar-entry-label" });
+            entryLine.createSpan({ text: entryTime, cls: "lapse-sidebar-entry-time" });
+          });
+        }
       }
     }
     await this.renderPieChart(container, todayStart);
@@ -1816,9 +1880,18 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     }
     this.refreshInterval = window.setInterval(() => {
       this.updateTimers().catch((err) => console.error("Error updating timers:", err));
-    }, 2e3);
+    }, 1e3);
   }
   async updateTimers() {
+    this.refreshCounter++;
+    if (this.refreshCounter >= 10) {
+      this.refreshCounter = 0;
+      this.plugin.timeData.forEach((pageData, filePath) => {
+        this.plugin.invalidateCacheForFile(filePath);
+      });
+      await this.render();
+      return;
+    }
     const currentActiveTimers = [];
     this.plugin.timeData.forEach((pageData, filePath) => {
       pageData.entries.forEach((entry) => {
