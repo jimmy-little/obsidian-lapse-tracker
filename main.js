@@ -44,8 +44,10 @@ var DEFAULT_SETTINGS = {
   defaultTagOnNote: "#lapse",
   defaultTagOnTimeEntries: "",
   timeAdjustMinutes: 5,
-  firstDayOfWeek: 0
+  firstDayOfWeek: 0,
   // 0 = Sunday
+  excludedFolders: []
+  // No folders excluded by default
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -66,6 +68,7 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     console.log(`Lapse: Plugin loading... (${Date.now() - pluginStartTime}ms)`);
     this.registerMarkdownCodeBlockProcessor("lapse", this.processTimerCodeBlock.bind(this));
     this.registerMarkdownCodeBlockProcessor("lapse-autostart", this.processAutoStartTimerCodeBlock.bind(this));
+    this.registerMarkdownCodeBlockProcessor("lapse-report", this.processReportCodeBlock.bind(this));
     this.registerView(
       "lapse-sidebar",
       (leaf) => new LapseSidebarView(leaf, this)
@@ -85,14 +88,16 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       name: "Add time tracker",
       editorCallback: (editor) => {
         editor.replaceSelection("```lapse\n\n```");
-      }
+      },
+      hotkeys: []
     });
     this.addCommand({
       id: "insert-lapse-autostart",
       name: "Add and start time tracker",
       editorCallback: (editor) => {
         editor.replaceSelection("```lapse-autostart\n\n```");
-      }
+      },
+      hotkeys: []
     });
     this.addCommand({
       id: "quick-start-timer",
@@ -395,6 +400,26 @@ ${content}`;
     result = result.replace(/^[-_\s]+|[-_\s]+$/g, "");
     result = result.trim();
     return result || fileName;
+  }
+  patternToRegex(pattern) {
+    pattern = pattern.replace(/\\/g, "/");
+    pattern = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    pattern = pattern.replace(/\*\*/g, "<<<DOUBLESTAR>>>");
+    pattern = pattern.replace(/\*/g, "[^/]*");
+    pattern = pattern.replace(/<<<DOUBLESTAR>>>/g, ".*");
+    return new RegExp("^" + pattern);
+  }
+  isFileExcluded(filePath) {
+    if (this.settings.excludedFolders.length === 0) {
+      return false;
+    }
+    const normalizedPath = filePath.replace(/\\/g, "/");
+    return this.settings.excludedFolders.some((pattern) => {
+      if (!pattern.trim())
+        return false;
+      const regex = this.patternToRegex(pattern);
+      return regex.test(normalizedPath);
+    });
   }
   async getProjectFromFrontmatter(filePath) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -708,6 +733,459 @@ ${content}`;
       });
     }
     await this.processTimerCodeBlock(source, el, ctx);
+  }
+  async processReportCodeBlock(source, el, ctx) {
+    const query = this.parseQuery(source);
+    console.log("Lapse Report Query:", query);
+    const { startTime, endTime } = this.getDateRange(query);
+    console.log("Date Range:", {
+      startTime: new Date(startTime).toISOString(),
+      endTime: new Date(endTime).toISOString()
+    });
+    const matchedEntries = await this.getMatchingEntries(query, startTime, endTime);
+    console.log("Matched Entries:", matchedEntries.length);
+    const groupedData = this.groupEntries(matchedEntries, query.groupBy || "project");
+    console.log("Grouped Data:", groupedData.size, "groups");
+    const container = el.createDiv({ cls: "lapse-report-container" });
+    if (query.display === "summary") {
+      await this.renderReportSummary(container, groupedData, query);
+    } else {
+      await this.renderReportTable(container, groupedData, query);
+    }
+  }
+  parseQuery(source) {
+    const query = {
+      display: "table",
+      groupBy: "project",
+      chart: "none"
+    };
+    const lines = source.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    for (const line of lines) {
+      const [key, ...valueParts] = line.split(":").map((s) => s.trim());
+      let value = valueParts.join(":").trim();
+      if (!value)
+        continue;
+      value = this.cleanQueryValue(value);
+      switch (key.toLowerCase()) {
+        case "project":
+          query.project = value;
+          break;
+        case "tag":
+          query.tag = value;
+          break;
+        case "note":
+          query.note = value;
+          break;
+        case "from":
+          query.from = value;
+          break;
+        case "to":
+          query.to = value;
+          break;
+        case "period":
+          const periodValue = value.toLowerCase();
+          if (["today", "thisweek", "thismonth", "lastweek", "lastmonth"].includes(periodValue)) {
+            if (periodValue === "thisweek")
+              query.period = "thisWeek";
+            else if (periodValue === "thismonth")
+              query.period = "thisMonth";
+            else if (periodValue === "lastweek")
+              query.period = "lastWeek";
+            else if (periodValue === "lastmonth")
+              query.period = "lastMonth";
+            else
+              query.period = periodValue;
+          }
+          break;
+        case "group-by":
+          if (["project", "date", "tag"].includes(value.toLowerCase())) {
+            query.groupBy = value.toLowerCase();
+          }
+          break;
+        case "display":
+          if (["table", "summary"].includes(value.toLowerCase())) {
+            query.display = value.toLowerCase();
+          }
+          break;
+        case "chart":
+          if (["bar", "pie", "none"].includes(value.toLowerCase())) {
+            query.chart = value.toLowerCase();
+          }
+          break;
+      }
+    }
+    return query;
+  }
+  cleanQueryValue(value) {
+    value = value.replace(/\[\[/g, "").replace(/\]\]/g, "");
+    value = value.replace(/^["']|["']$/g, "");
+    value = value.replace(/^#/, "");
+    return value.trim();
+  }
+  getDateRange(query) {
+    let startTime;
+    let endTime;
+    if (query.period) {
+      const now = new Date();
+      let startDate;
+      let endDate = new Date(now);
+      if (query.period === "today") {
+        startDate = new Date(now);
+        startDate.setHours(0, 0, 0, 0);
+      } else if (query.period === "thisWeek") {
+        startDate = new Date(now);
+        const dayOfWeek = startDate.getDay();
+        const daysFromFirstDay = (dayOfWeek - this.settings.firstDayOfWeek + 7) % 7;
+        startDate.setDate(startDate.getDate() - daysFromFirstDay);
+        startDate.setHours(0, 0, 0, 0);
+      } else if (query.period === "thisMonth") {
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        startDate.setHours(0, 0, 0, 0);
+      } else if (query.period === "lastWeek") {
+        const firstDayOfWeek = this.settings.firstDayOfWeek;
+        const today = new Date(now);
+        const dayOfWeek = today.getDay();
+        const daysFromFirstDay = (dayOfWeek - firstDayOfWeek + 7) % 7;
+        startDate = new Date(today);
+        startDate.setDate(today.getDate() - daysFromFirstDay - 7);
+        startDate.setHours(0, 0, 0, 0);
+        endDate = new Date(startDate);
+        endDate.setDate(startDate.getDate() + 6);
+        endDate.setHours(23, 59, 59, 999);
+      } else {
+        const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        startDate = new Date(lastMonth);
+        startDate.setHours(0, 0, 0, 0);
+        endDate = new Date(now.getFullYear(), now.getMonth(), 0);
+        endDate.setHours(23, 59, 59, 999);
+      }
+      startTime = startDate.getTime();
+      endTime = endDate.getTime();
+    } else {
+      if (query.from) {
+        const startDate = new Date(query.from);
+        startDate.setHours(0, 0, 0, 0);
+        startTime = startDate.getTime();
+      } else {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        startTime = today.getTime();
+      }
+      if (query.to) {
+        const endDate = new Date(query.to);
+        endDate.setHours(23, 59, 59, 999);
+        endTime = endDate.getTime();
+      } else {
+        const today = new Date();
+        today.setHours(23, 59, 59, 999);
+        endTime = today.getTime();
+      }
+    }
+    return { startTime, endTime };
+  }
+  async getMatchingEntries(query, startTime, endTime) {
+    const matchedEntries = [];
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    for (const file of markdownFiles) {
+      const filePath = file.path;
+      if (this.isFileExcluded(filePath)) {
+        continue;
+      }
+      let noteName = file.basename;
+      if (this.settings.hideTimestampsInViews) {
+        noteName = this.removeTimestampFromFileName(noteName);
+      }
+      if (query.note && !noteName.toLowerCase().includes(query.note.toLowerCase())) {
+        continue;
+      }
+      const { entries: fileEntries, project } = await this.getCachedOrLoadEntries(filePath);
+      if (query.project) {
+        if (!project) {
+          continue;
+        }
+        if (!project.toLowerCase().includes(query.project.toLowerCase())) {
+          continue;
+        }
+      }
+      const noteTags = await this.getNoteTags(filePath);
+      for (const entry of fileEntries) {
+        if (!entry.startTime || entry.startTime < startTime || entry.startTime > endTime) {
+          continue;
+        }
+        if (query.tag) {
+          const tagLower = query.tag.toLowerCase();
+          const hasNoteTag = noteTags.some((t) => t.toLowerCase().includes(tagLower));
+          const hasEntryTag = entry.tags && entry.tags.some((t) => t.toLowerCase().includes(tagLower));
+          if (!hasNoteTag && !hasEntryTag) {
+            continue;
+          }
+        }
+        if (entry.endTime || entry.startTime && !entry.endTime) {
+          matchedEntries.push({
+            filePath,
+            entry,
+            project,
+            noteName,
+            noteTags
+          });
+        }
+      }
+    }
+    return matchedEntries;
+  }
+  async getNoteTags(filePath) {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!file || !(file instanceof import_obsidian.TFile)) {
+      return [];
+    }
+    try {
+      const content = await this.app.vault.read(file);
+      const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+      const match = content.match(frontmatterRegex);
+      if (!match) {
+        return [];
+      }
+      const frontmatter = match[1];
+      const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]]+)\]?/);
+      if (tagsMatch) {
+        return tagsMatch[1].split(",").map((t) => t.trim().replace(/['"#]/g, "")).filter((t) => t);
+      }
+      return [];
+    } catch (error) {
+      return [];
+    }
+  }
+  groupEntries(entries, groupBy) {
+    const grouped = /* @__PURE__ */ new Map();
+    for (const item of entries) {
+      let groupKey;
+      if (groupBy === "project") {
+        groupKey = item.project ? item.project.split("/").pop() || "No Project" : "No Project";
+      } else if (groupBy === "date") {
+        const date = new Date(item.entry.startTime);
+        groupKey = date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      } else {
+        groupKey = item.entry.tags && item.entry.tags.length > 0 ? `#${item.entry.tags[0]}` : "No Tag";
+      }
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          totalTime: 0,
+          entryCount: 0,
+          entries: []
+        });
+      }
+      const group = grouped.get(groupKey);
+      const entryDuration = item.entry.endTime ? item.entry.duration : item.entry.duration + (Date.now() - item.entry.startTime);
+      group.totalTime += entryDuration;
+      group.entryCount++;
+      group.entries.push(item);
+    }
+    return grouped;
+  }
+  async renderReportSummary(container, groupedData, query) {
+    container.createEl("h4", { text: "Summary", cls: "lapse-report-title" });
+    let totalTime = 0;
+    groupedData.forEach((group) => {
+      totalTime += group.totalTime;
+    });
+    const summaryDiv = container.createDiv({ cls: "lapse-report-summary-total" });
+    summaryDiv.createEl("span", { text: "Total Time: ", cls: "lapse-report-summary-label" });
+    summaryDiv.createEl("span", { text: this.formatTimeAsHHMMSS(totalTime), cls: "lapse-report-summary-value" });
+    const breakdownDiv = container.createDiv({ cls: "lapse-report-breakdown" });
+    const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
+    for (const [groupName, group] of sortedGroups) {
+      const groupDiv = breakdownDiv.createDiv({ cls: "lapse-report-breakdown-item" });
+      groupDiv.createEl("span", { text: groupName, cls: "lapse-report-breakdown-name" });
+      groupDiv.createEl("span", { text: this.formatTimeAsHHMMSS(group.totalTime), cls: "lapse-report-breakdown-time" });
+    }
+    if (query.chart && query.chart !== "none" && sortedGroups.length > 0) {
+      const chartContainer = container.createDiv({ cls: "lapse-report-chart-container" });
+      const chartData = sortedGroups.map(([group, data]) => ({
+        group,
+        totalTime: data.totalTime
+      }));
+      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+    }
+  }
+  async renderReportTable(container, groupedData, query) {
+    container.createEl("h4", { text: "Report", cls: "lapse-report-title" });
+    let totalTime = 0;
+    groupedData.forEach((group) => {
+      totalTime += group.totalTime;
+    });
+    const summaryDiv = container.createDiv({ cls: "lapse-report-summary-total" });
+    summaryDiv.createEl("span", { text: "Total: ", cls: "lapse-report-summary-label" });
+    summaryDiv.createEl("span", { text: this.formatTimeAsHHMMSS(totalTime), cls: "lapse-report-summary-value" });
+    const tableContainer = container.createDiv({ cls: "lapse-report-table-container" });
+    const table = tableContainer.createEl("table", { cls: "lapse-reports-table" });
+    const thead = table.createEl("thead");
+    const headerRow = thead.createEl("tr");
+    headerRow.createEl("th", { text: this.getGroupByLabel(query.groupBy || "project") });
+    headerRow.createEl("th", { text: "Entries" });
+    headerRow.createEl("th", { text: "Time" });
+    const tbody = table.createEl("tbody");
+    const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
+    for (const [groupName, group] of sortedGroups) {
+      const row = tbody.createEl("tr");
+      row.createEl("td", { text: groupName });
+      row.createEl("td", { text: group.entryCount.toString() });
+      row.createEl("td", { text: this.formatTimeAsHHMMSS(group.totalTime) });
+    }
+    if (query.chart && query.chart !== "none" && sortedGroups.length > 0) {
+      const chartContainer = container.createDiv({ cls: "lapse-report-chart-container" });
+      const chartData = sortedGroups.map(([group, data]) => ({
+        group,
+        totalTime: data.totalTime
+      }));
+      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+    }
+  }
+  getGroupByLabel(groupBy) {
+    switch (groupBy) {
+      case "project":
+        return "Project";
+      case "date":
+        return "Date";
+      case "tag":
+        return "Tag";
+      default:
+        return "Group";
+    }
+  }
+  async renderReportChart(container, data, totalTime, chartType) {
+    if (chartType === "pie") {
+      await this.renderPieChart(container, data, totalTime);
+    } else {
+      await this.renderBarChart(container, data, totalTime);
+    }
+  }
+  async renderPieChart(container, data, totalTime) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "lapse-report-pie-chart");
+    svg.setAttribute("width", "300");
+    svg.setAttribute("height", "300");
+    svg.setAttribute("viewBox", "0 0 300 300");
+    container.appendChild(svg);
+    const colors = [
+      "#4A90E2",
+      "#50C878",
+      "#FF6B6B",
+      "#FFD93D",
+      "#9B59B6",
+      "#E67E22",
+      "#1ABC9C",
+      "#E74C3C"
+    ];
+    const centerX = 150;
+    const centerY = 150;
+    const radius = 100;
+    let currentAngle = -Math.PI / 2;
+    data.forEach(({ group, totalTime: time }, index) => {
+      const percentage = time / totalTime;
+      const angle = percentage * 2 * Math.PI;
+      const startAngle = currentAngle;
+      const endAngle = currentAngle + angle;
+      const x1 = centerX + radius * Math.cos(startAngle);
+      const y1 = centerY + radius * Math.sin(startAngle);
+      const x2 = centerX + radius * Math.cos(endAngle);
+      const y2 = centerY + radius * Math.sin(endAngle);
+      const largeArc = angle > Math.PI ? 1 : 0;
+      const pathData = [
+        `M ${centerX} ${centerY}`,
+        `L ${x1} ${y1}`,
+        `A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
+        "Z"
+      ].join(" ");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathData);
+      path.setAttribute("fill", colors[index % colors.length]);
+      path.setAttribute("stroke", "var(--background-primary)");
+      path.setAttribute("stroke-width", "2");
+      svg.appendChild(path);
+      currentAngle += angle;
+    });
+    const legend = container.createDiv({ cls: "lapse-report-legend" });
+    data.forEach(({ group, totalTime: time }, index) => {
+      const legendItem = legend.createDiv({ cls: "lapse-report-legend-item" });
+      const colorBox = legendItem.createDiv({ cls: "lapse-report-legend-color" });
+      colorBox.style.backgroundColor = colors[index % colors.length];
+      const label = legendItem.createDiv({ cls: "lapse-report-legend-label" });
+      label.createSpan({ text: group });
+      label.createSpan({ text: this.formatTimeAsHHMMSS(time), cls: "lapse-report-legend-time" });
+    });
+  }
+  async renderBarChart(container, data, totalTime) {
+    const viewBoxWidth = 800;
+    const chartHeight = 250;
+    const labelHeight = 80;
+    const totalHeight = chartHeight + labelHeight;
+    const padding = 40;
+    const chartAreaWidth = viewBoxWidth - padding * 2;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "lapse-report-bar-chart");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", "300");
+    svg.setAttribute("viewBox", `0 0 ${viewBoxWidth} ${totalHeight}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    container.appendChild(svg);
+    const colors = [
+      "#4A90E2",
+      "#50C878",
+      "#FF6B6B",
+      "#FFD93D",
+      "#9B59B6",
+      "#E67E22",
+      "#1ABC9C",
+      "#E74C3C"
+    ];
+    const maxTime = Math.max(...data.map((d) => d.totalTime));
+    const barCount = data.length;
+    const barWidth = chartAreaWidth / barCount;
+    const maxBarHeight = chartHeight - padding * 2;
+    data.forEach((item, index) => {
+      const barHeight = maxTime > 0 ? item.totalTime / maxTime * maxBarHeight : 0;
+      const x = padding + index * barWidth;
+      const y = chartHeight - padding - barHeight;
+      const barGap = barWidth * 0.1;
+      const actualBarWidth = barWidth - barGap;
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", (x + barGap / 2).toString());
+      rect.setAttribute("y", y.toString());
+      rect.setAttribute("width", actualBarWidth.toString());
+      rect.setAttribute("height", barHeight.toString());
+      rect.setAttribute("fill", colors[index % colors.length]);
+      rect.setAttribute("rx", "4");
+      svg.appendChild(rect);
+      const labelY = chartHeight + 10;
+      const foreignObject = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+      foreignObject.setAttribute("x", (x + barGap / 2).toString());
+      foreignObject.setAttribute("y", labelY.toString());
+      foreignObject.setAttribute("width", actualBarWidth.toString());
+      foreignObject.setAttribute("height", labelHeight.toString());
+      const labelDiv = document.createElement("div");
+      labelDiv.setAttribute("class", "lapse-chart-label");
+      labelDiv.style.width = "100%";
+      labelDiv.style.height = "100%";
+      labelDiv.style.display = "flex";
+      labelDiv.style.alignItems = "flex-start";
+      labelDiv.style.justifyContent = "center";
+      labelDiv.style.fontSize = barCount > 15 ? "9px" : barCount > 10 ? "10px" : "11px";
+      labelDiv.style.color = "var(--text-muted)";
+      labelDiv.style.textAlign = "center";
+      labelDiv.style.wordWrap = "break-word";
+      labelDiv.style.overflowWrap = "break-word";
+      labelDiv.style.lineHeight = "1.2";
+      labelDiv.style.padding = "0 2px";
+      if (barCount > 10) {
+        labelDiv.style.writingMode = "vertical-rl";
+        labelDiv.style.textOrientation = "mixed";
+        labelDiv.style.transform = "rotate(180deg)";
+        labelDiv.style.alignItems = "center";
+      }
+      labelDiv.textContent = item.group;
+      foreignObject.appendChild(labelDiv);
+      svg.appendChild(foreignObject);
+    });
   }
   renderEntryCards(cardsContainer, entries, filePath, labelDisplay, labelInput) {
     cardsContainer.empty();
@@ -1074,6 +1552,9 @@ ${frontmatterLines.join("\n")}
     const markdownFiles = this.app.vault.getMarkdownFiles();
     for (const file of markdownFiles) {
       const filePath = file.path;
+      if (this.isFileExcluded(filePath)) {
+        continue;
+      }
       if (this.timeData.has(filePath)) {
         continue;
       }
@@ -1400,6 +1881,9 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     const markdownFiles = this.app.vault.getMarkdownFiles();
     for (const file of markdownFiles) {
       const filePath = file.path;
+      if (this.plugin.isFileExcluded(filePath)) {
+        continue;
+      }
       if (this.plugin.timeData.has(filePath)) {
         continue;
       }
@@ -1582,6 +2066,21 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.timeAdjustMinutes = numValue;
       await this.plugin.saveSettings();
     }));
+    containerEl.createEl("h3", { text: "Performance" });
+    new import_obsidian.Setting(containerEl).setName("Excluded folders").setDesc("Folders to exclude from time tracking (one pattern per line). Supports glob patterns like */2020/* or **/Archive/**").addTextArea((text) => {
+      text.setPlaceholder("Templates\n*/2020/*\n**/Archive/**").setValue(this.plugin.settings.excludedFolders.join("\n")).onChange(async (value) => {
+        this.plugin.settings.excludedFolders = value.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+        await this.plugin.saveSettings();
+      });
+      text.inputEl.rows = 6;
+      text.inputEl.cols = 40;
+    });
+    containerEl.createDiv({ cls: "setting-item-description" }).createEl("div", { text: "Example patterns:", cls: "setting-item-description" }).createEl("ul", {}, (ul) => {
+      ul.createEl("li", { text: "Templates - Exact folder name" });
+      ul.createEl("li", { text: "*/2020/* - 2020 folder one level deep" });
+      ul.createEl("li", { text: "**/2020/** - 2020 folder at any depth" });
+      ul.createEl("li", { text: "**/Archive - Any folder ending in Archive" });
+    });
   }
 };
 var LapseReportsView = class extends import_obsidian.ItemView {
@@ -1845,6 +2344,9 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     const markdownFiles = this.app.vault.getMarkdownFiles();
     for (const file of markdownFiles) {
       const filePath = file.path;
+      if (this.plugin.isFileExcluded(filePath)) {
+        continue;
+      }
       const { entries: fileEntries, project } = await this.plugin.getCachedOrLoadEntries(filePath);
       for (const entry of fileEntries) {
         if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {

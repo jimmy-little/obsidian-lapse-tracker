@@ -866,3 +866,120 @@
 .lapse-chart-label {
     font-family: var(--font-interface);
 }
+
+/* Inline Report Query Styles */
+
+.lapse-report-container {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 8px 0;
+    background: var(--background-primary);
+}
+
+.lapse-report-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin: 0 0 12px 0;
+}
+
+.lapse-report-summary-total {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
+    background: var(--background-secondary);
+    border-radius: 6px;
+    margin-bottom: 16px;
+}
+
+.lapse-report-summary-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-normal);
+}
+
+.lapse-report-summary-value {
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+}
+
+.lapse-report-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.lapse-report-breakdown-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--background-secondary);
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.lapse-report-breakdown-name {
+    color: var(--text-normal);
+    font-weight: 500;
+}
+
+.lapse-report-breakdown-time {
+    color: var(--text-accent);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.lapse-report-table-container {
+    margin: 16px 0;
+    overflow-x: auto;
+}
+
+.lapse-report-pie-chart,
+.lapse-report-bar-chart {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 16px auto;
+}
+
+.lapse-report-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.lapse-report-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.lapse-report-legend-color {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    border: 1px solid var(--background-modifier-border);
+}
+
+.lapse-report-legend-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex: 1;
+    gap: 8px;
+}
+
+.lapse-report-legend-time {
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    font-weight: 500;
+}
