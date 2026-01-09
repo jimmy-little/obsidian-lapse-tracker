@@ -46,8 +46,10 @@ var DEFAULT_SETTINGS = {
   timeAdjustMinutes: 5,
   firstDayOfWeek: 0,
   // 0 = Sunday
-  excludedFolders: []
+  excludedFolders: [],
   // No folders excluded by default
+  showStatusBar: true
+  // Show active timers in status bar by default
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -60,14 +62,19 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     this.cacheLoading = false;
     // Track if cache is still loading
     this.cacheLoaded = null;
+    // Promise to wait for cache loading
+    this.statusBarItem = null;
+    // Status bar element
+    this.statusBarUpdateInterval = null;
+    // Interval for updating status bar
+    this.pendingSaves = [];
   }
-  // Promise to wait for cache loading
+  // Track pending save operations
   async onload() {
     const pluginStartTime = Date.now();
     await this.loadSettings();
     console.log(`Lapse: Plugin loading... (${Date.now() - pluginStartTime}ms)`);
     this.registerMarkdownCodeBlockProcessor("lapse", this.processTimerCodeBlock.bind(this));
-    this.registerMarkdownCodeBlockProcessor("lapse-autostart", this.processAutoStartTimerCodeBlock.bind(this));
     this.registerMarkdownCodeBlockProcessor("lapse-report", this.processReportCodeBlock.bind(this));
     this.registerView(
       "lapse-sidebar",
@@ -94,8 +101,49 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     this.addCommand({
       id: "insert-lapse-autostart",
       name: "Add and start time tracker",
-      editorCallback: (editor) => {
-        editor.replaceSelection("```lapse-autostart\n\n```");
+      editorCallback: async (editor, view) => {
+        const file = view.file;
+        if (!file)
+          return;
+        const filePath = file.path;
+        editor.replaceSelection("```lapse\n\n```");
+        if (!this.timeData.has(filePath)) {
+          this.timeData.set(filePath, {
+            entries: [],
+            totalTimeTracked: 0
+          });
+        }
+        const pageData = this.timeData.get(filePath);
+        const hasActiveTimer = pageData.entries.some((e) => e.startTime !== null && e.endTime === null);
+        if (!hasActiveTimer) {
+          const label = await this.getDefaultLabel(filePath);
+          const newEntry = {
+            id: `${filePath}-${Date.now()}-${Math.random()}`,
+            label,
+            startTime: Date.now(),
+            endTime: null,
+            duration: 0,
+            isPaused: false,
+            tags: this.getDefaultTags()
+          };
+          pageData.entries.push(newEntry);
+          await this.addDefaultTagToNote(filePath);
+          await this.updateFrontmatter(filePath);
+          this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
+            if (leaf.view instanceof LapseSidebarView) {
+              leaf.view.refresh();
+            }
+          });
+        }
+        const activeLeaf = this.app.workspace.activeLeaf;
+        if (activeLeaf && activeLeaf.view.getViewType() === "markdown") {
+          const state = activeLeaf.view.getState();
+          await activeLeaf.setViewState({
+            type: "markdown",
+            // @ts-ignore - state has mode property
+            state: { ...state, mode: "preview" }
+          });
+        }
       },
       hotkeys: []
     });
@@ -148,6 +196,24 @@ var LapsePlugin = class extends import_obsidian.Plugin {
             }
           });
         }
+        const activeLeaf = this.app.workspace.activeLeaf;
+        if (activeLeaf && activeLeaf.view.getViewType() === "markdown") {
+          const state = activeLeaf.view.getState();
+          const currentMode = state.mode || "source";
+          const tempMode = currentMode === "source" ? "preview" : "source";
+          await activeLeaf.setViewState({
+            type: "markdown",
+            // @ts-ignore
+            state: { ...state, mode: tempMode }
+          });
+          setTimeout(async () => {
+            await activeLeaf.setViewState({
+              type: "markdown",
+              // @ts-ignore
+              state: { ...state, mode: currentMode }
+            });
+          }, 50);
+        }
       }
     });
     this.addCommand({
@@ -165,8 +231,47 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       }
     });
     this.addSettingTab(new LapseSettingTab(this.app, this));
+    if (this.settings.showStatusBar) {
+      this.statusBarItem = this.addStatusBarItem();
+      this.statusBarItem.addClass("lapse-status-bar");
+      this.updateStatusBar();
+      this.statusBarUpdateInterval = window.setInterval(() => {
+        this.updateStatusBar();
+      }, 1e3);
+    }
     const totalLoadTime = Date.now() - pluginStartTime;
     console.log(`Lapse: Plugin loaded in ${totalLoadTime}ms`);
+  }
+  updateStatusBar() {
+    if (!this.settings.showStatusBar || !this.statusBarItem) {
+      return;
+    }
+    const activeTimers = [];
+    for (const [filePath, pageData] of this.timeData) {
+      for (const entry of pageData.entries) {
+        if (entry.startTime !== null && entry.endTime === null) {
+          activeTimers.push({ filePath, entry });
+        }
+      }
+    }
+    if (activeTimers.length === 0) {
+      this.statusBarItem.setText("");
+      this.statusBarItem.hide();
+    } else if (activeTimers.length === 1) {
+      const { entry } = activeTimers[0];
+      const elapsed = entry.duration + (Date.now() - entry.startTime);
+      const timeText = this.formatTimeForTimerDisplay(elapsed);
+      this.statusBarItem.setText(`${entry.label} - ${timeText}`);
+      this.statusBarItem.show();
+    } else {
+      let totalElapsed = 0;
+      for (const { entry } of activeTimers) {
+        totalElapsed += entry.duration + (Date.now() - entry.startTime);
+      }
+      const timeText = this.formatTimeForTimerDisplay(totalElapsed);
+      this.statusBarItem.setText(`${activeTimers.length} timers - ${timeText}`);
+      this.statusBarItem.show();
+    }
   }
   async loadEntriesFromFrontmatter(filePath) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -296,7 +401,7 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       if (match) {
         const frontmatter = match[1];
         if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
-          const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]]+)\]?/);
+          const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]\n]+)\]?/);
           if (tagsMatch) {
             const existingTags = tagsMatch[1].split(",").map((t) => t.trim().replace(/['"#]/g, ""));
             if (existingTags.includes(tagName)) {
@@ -304,11 +409,19 @@ var LapsePlugin = class extends import_obsidian.Plugin {
             }
           }
           const newContent = content.replace(
-            /(tags?:\s*\[?)([^\]]+)(\]?)/,
-            (match2, prefix, tags, suffix) => {
-              const tagList = tags.split(",").map((t) => t.trim()).filter((t) => t);
-              tagList.push(tagName);
-              return `${prefix}${tagList.map((t) => `"${t}"`).join(", ")}${suffix}`;
+            /(^tags?:\s*)(.+?)$/m,
+            (match2, prefix, existingTagsStr) => {
+              let tagList = [];
+              const arrayMatch = existingTagsStr.match(/\[(.+)\]/);
+              if (arrayMatch) {
+                tagList = arrayMatch[1].split(",").map((t) => t.trim().replace(/['"#]/g, "")).filter((t) => t);
+              } else {
+                tagList = existingTagsStr.split(/[\s,]+/).map((t) => t.trim().replace(/['"#]/g, "")).filter((t) => t);
+              }
+              if (!tagList.includes(tagName)) {
+                tagList.push(tagName);
+              }
+              return `${prefix}[${tagList.map((t) => `"${t}"`).join(", ")}]`;
             }
           );
           await this.app.vault.modify(file, newContent);
@@ -475,46 +588,51 @@ ${content}`;
     const pageData = this.timeData.get(filePath);
     const activeTimer = pageData.entries.find((e) => e.startTime !== null && e.endTime === null);
     const container = el.createDiv({ cls: "lapse-container" });
-    const actionBar = container.createDiv({ cls: "lapse-action-bar" });
-    const timerContainer = actionBar.createDiv({ cls: "lapse-timer-container" });
+    const mainLayout = container.createDiv({ cls: "lapse-main-layout" });
+    const timerContainer = mainLayout.createDiv({ cls: "lapse-timer-container" });
     const timerDisplay = timerContainer.createDiv({ cls: "lapse-timer-display" });
     timerDisplay.setText("--:--");
     const adjustButtonsContainer = timerContainer.createDiv({ cls: "lapse-adjust-buttons" });
-    const adjustBackBtn = adjustButtonsContainer.createEl("button", { cls: "lapse-btn-adjust" });
-    (0, import_obsidian.setIcon)(adjustBackBtn, "chevron-left");
+    const adjustBackBtn = adjustButtonsContainer.createEl("button", {
+      cls: "lapse-btn-adjust",
+      text: `-${this.settings.timeAdjustMinutes}`
+    });
     adjustBackBtn.disabled = !activeTimer;
-    const adjustForwardBtn = adjustButtonsContainer.createEl("button", { cls: "lapse-btn-adjust" });
-    (0, import_obsidian.setIcon)(adjustForwardBtn, "chevron-right");
+    const adjustForwardBtn = adjustButtonsContainer.createEl("button", {
+      cls: "lapse-btn-adjust",
+      text: `+${this.settings.timeAdjustMinutes}`
+    });
     adjustForwardBtn.disabled = !activeTimer;
-    const inputContainer = actionBar.createDiv({ cls: "lapse-input-container" });
+    const rightColumn = mainLayout.createDiv({ cls: "lapse-right-column" });
+    const topLine = rightColumn.createDiv({ cls: "lapse-top-line" });
     let labelDisplay;
     let labelInput = null;
     if (activeTimer) {
-      labelDisplay = inputContainer.createEl("div", {
+      labelDisplay = topLine.createEl("div", {
         text: activeTimer.label,
         cls: "lapse-label-display-running"
       });
     } else {
-      labelInput = inputContainer.createEl("input", {
+      labelInput = topLine.createEl("input", {
         type: "text",
         placeholder: "Timer label...",
         cls: "lapse-label-input"
       });
       labelDisplay = labelInput;
     }
-    const summaryLine = inputContainer.createDiv({ cls: "lapse-summary" });
-    const summaryLeft = summaryLine.createDiv({ cls: "lapse-summary-left" });
-    const summaryRight = summaryLine.createDiv({ cls: "lapse-summary-right" });
-    const todayLabel = summaryRight.createDiv({ cls: "lapse-today-label" });
-    const buttonsContainer = actionBar.createDiv({ cls: "lapse-buttons-container" });
-    const playStopBtn = buttonsContainer.createEl("button", { cls: "lapse-btn-play-stop" });
+    const playStopBtn = topLine.createEl("button", { cls: "lapse-btn-play-stop" });
     if (activeTimer) {
       (0, import_obsidian.setIcon)(playStopBtn, "square");
+      playStopBtn.classList.add("lapse-btn-stop");
     } else {
       (0, import_obsidian.setIcon)(playStopBtn, "play");
+      playStopBtn.classList.add("lapse-btn-play");
     }
-    const chevronBtn = buttonsContainer.createEl("button", { cls: "lapse-btn-chevron" });
+    const chevronBtn = topLine.createEl("button", { cls: "lapse-btn-chevron" });
     (0, import_obsidian.setIcon)(chevronBtn, "chevron-down");
+    const bottomLine = rightColumn.createDiv({ cls: "lapse-bottom-line" });
+    const summaryLeft = bottomLine.createDiv({ cls: "lapse-summary-left" });
+    const todayLabel = bottomLine.createDiv({ cls: "lapse-today-label" });
     const calculateTotalTime = () => {
       return pageData.entries.reduce((sum, e) => {
         if (e.endTime !== null) {
@@ -546,7 +664,7 @@ ${content}`;
       adjustForwardBtn.disabled = !currentActiveTimer;
       if (currentActiveTimer && currentActiveTimer.startTime) {
         const elapsed = currentActiveTimer.duration + (Date.now() - currentActiveTimer.startTime);
-        timerDisplay.setText(this.formatTimeAsHHMMSS(elapsed));
+        timerDisplay.setText(this.formatTimeForTimerDisplay(elapsed));
       } else {
         timerDisplay.setText("--:--");
       }
@@ -617,14 +735,20 @@ ${content}`;
           labelInput.value = "";
         } else if (labelDisplay) {
           labelDisplay.remove();
-          labelInput = inputContainer.createEl("input", {
+          labelInput = topLine.createEl("input", {
             type: "text",
             placeholder: "Timer label...",
             cls: "lapse-label-input"
           });
+          const playBtn = topLine.querySelector(".lapse-btn-play-stop");
+          if (playBtn) {
+            topLine.insertBefore(labelInput, playBtn);
+          }
           labelDisplay = labelInput;
         }
         (0, import_obsidian.setIcon)(playStopBtn, "play");
+        playStopBtn.classList.remove("lapse-btn-stop");
+        playStopBtn.classList.add("lapse-btn-play");
         updateDisplays();
         this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
         this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
@@ -657,26 +781,31 @@ ${content}`;
         await this.updateFrontmatter(filePath);
         if (labelInput) {
           labelInput.remove();
-          labelDisplay = inputContainer.createEl("div", {
+          labelDisplay = topLine.createEl("div", {
             text: label,
             // Use the resolved label value
             cls: "lapse-label-display-running"
           });
+          const playBtn = topLine.querySelector(".lapse-btn-play-stop");
+          if (playBtn) {
+            topLine.insertBefore(labelDisplay, playBtn);
+          }
           labelInput = null;
         } else if (labelDisplay) {
-          labelDisplay.remove();
-          labelDisplay = inputContainer.createEl("div", {
-            text: label,
-            // Use the resolved label value
-            cls: "lapse-label-display-running"
-          });
+          labelDisplay.setText(label);
         } else {
-          labelDisplay = inputContainer.createEl("div", {
+          labelDisplay = topLine.createEl("div", {
             text: label,
             cls: "lapse-label-display-running"
           });
+          const playBtn = topLine.querySelector(".lapse-btn-play-stop");
+          if (playBtn) {
+            topLine.insertBefore(labelDisplay, playBtn);
+          }
         }
         (0, import_obsidian.setIcon)(playStopBtn, "square");
+        playStopBtn.classList.remove("lapse-btn-play");
+        playStopBtn.classList.add("lapse-btn-stop");
         updateDisplays();
         this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
         this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
@@ -700,39 +829,6 @@ ${content}`;
       await this.updateFrontmatter(filePath);
       this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
     };
-  }
-  async processAutoStartTimerCodeBlock(source, el, ctx) {
-    const filePath = ctx.sourcePath;
-    await this.loadEntriesFromFrontmatter(filePath);
-    if (!this.timeData.has(filePath)) {
-      this.timeData.set(filePath, {
-        entries: [],
-        totalTimeTracked: 0
-      });
-    }
-    const pageData = this.timeData.get(filePath);
-    const activeTimer = pageData.entries.find((e) => e.startTime !== null && e.endTime === null);
-    if (!activeTimer) {
-      const label = await this.getDefaultLabel(filePath);
-      const newEntry = {
-        id: `${filePath}-${Date.now()}-${Math.random()}`,
-        label,
-        startTime: Date.now(),
-        endTime: null,
-        duration: 0,
-        isPaused: false,
-        tags: this.getDefaultTags()
-      };
-      pageData.entries.push(newEntry);
-      await this.addDefaultTagToNote(filePath);
-      await this.updateFrontmatter(filePath);
-      this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
-        if (leaf.view instanceof LapseSidebarView) {
-          leaf.view.refresh();
-        }
-      });
-    }
-    await this.processTimerCodeBlock(source, el, ctx);
   }
   async processReportCodeBlock(source, el, ctx) {
     const query = this.parseQuery(source);
@@ -1415,6 +1511,17 @@ ${content}`;
     const seconds = totalSeconds % 60;
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
+  formatTimeForTimerDisplay(milliseconds) {
+    const totalSeconds = Math.floor(milliseconds / 1e3);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor(totalSeconds % 3600 / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    } else {
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    }
+  }
   async updateFrontmatter(filePath) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!file || !(file instanceof import_obsidian.TFile))
@@ -1423,8 +1530,6 @@ ${content}`;
     if (!pageData)
       return;
     const content = await this.app.vault.read(file);
-    const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
-    const match = content.match(frontmatterRegex);
     const startedEntries = pageData.entries.filter((e) => e.startTime !== null);
     const startTime = startedEntries.length > 0 ? Math.min(...startedEntries.map((e) => e.startTime)) : null;
     const completedEntries = pageData.entries.filter((e) => e.endTime !== null);
@@ -1438,100 +1543,80 @@ ${content}`;
     }));
     const totalTimeTracked = pageData.entries.filter((e) => e.endTime !== null).reduce((sum, e) => sum + e.duration, 0);
     const totalTimeFormatted = this.formatTimeAsHHMMSS(totalTimeTracked);
-    let newContent;
-    if (match) {
-      const existingFrontmatter = match[1];
-      const lines = existingFrontmatter.split("\n");
-      const startTimeKey = this.settings.startTimeKey;
-      const endTimeKey = this.settings.endTimeKey;
-      const entriesKey = this.settings.entriesKey;
-      const totalTimeKey = this.settings.totalTimeKey;
-      let insideEntries = false;
-      const filteredLines = [];
-      for (const line of lines) {
+    const startTimeKey = this.settings.startTimeKey;
+    const endTimeKey = this.settings.endTimeKey;
+    const entriesKey = this.settings.entriesKey;
+    const totalTimeKey = this.settings.totalTimeKey;
+    let lapseFrontmatter = "";
+    if (startTime !== null) {
+      lapseFrontmatter += `${startTimeKey}: ${new Date(startTime).toISOString()}
+`;
+    }
+    if (endTime !== null) {
+      lapseFrontmatter += `${endTimeKey}: ${new Date(endTime).toISOString()}
+`;
+    }
+    if (entries.length > 0) {
+      lapseFrontmatter += `${entriesKey}:
+`;
+      entries.forEach((entry) => {
+        const escapedLabel = entry.label.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        lapseFrontmatter += `  - label: "${escapedLabel}"
+`;
+        if (entry.start) {
+          lapseFrontmatter += `    start: ${entry.start}
+`;
+        }
+        if (entry.end) {
+          lapseFrontmatter += `    end: ${entry.end}
+`;
+        }
+        lapseFrontmatter += `    duration: ${entry.duration}
+`;
+        if (entry.tags && entry.tags.length > 0) {
+          lapseFrontmatter += `    tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]
+`;
+        }
+      });
+    } else {
+      lapseFrontmatter += `${entriesKey}: []
+`;
+    }
+    lapseFrontmatter += `${totalTimeKey}: "${totalTimeFormatted}"
+`;
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (frontmatterMatch) {
+      const existingFM = frontmatterMatch[1];
+      const lines = existingFM.split("\n");
+      let inLapseArray = false;
+      const filteredLines = lines.filter((line) => {
         const trimmed = line.trim();
         if (trimmed.startsWith(`${entriesKey}:`)) {
-          insideEntries = true;
-          continue;
+          inLapseArray = true;
+          return false;
         }
-        if (insideEntries) {
-          if (line.match(/^\s+/)) {
-            continue;
+        if (inLapseArray) {
+          if (line.match(/^\s+(-|\w+:)/)) {
+            return false;
           }
-          insideEntries = false;
+          inLapseArray = false;
         }
         if (trimmed.startsWith(`${startTimeKey}:`) || trimmed.startsWith(`${endTimeKey}:`) || trimmed.startsWith(`${totalTimeKey}:`)) {
-          continue;
+          return false;
         }
-        filteredLines.push(line);
-      }
-      if (startTime !== null) {
-        filteredLines.push(`${startTimeKey}: ${new Date(startTime).toISOString()}`);
-      }
-      if (endTime !== null) {
-        filteredLines.push(`${endTimeKey}: ${new Date(endTime).toISOString()}`);
-      }
-      if (entries.length > 0) {
-        filteredLines.push(`${entriesKey}:`);
-        entries.forEach((entry) => {
-          filteredLines.push(`  - label: "${entry.label.replace(/"/g, '\\"')}"`);
-          if (entry.start) {
-            filteredLines.push(`    start: ${entry.start}`);
-          }
-          if (entry.end) {
-            filteredLines.push(`    end: ${entry.end}`);
-          }
-          filteredLines.push(`    duration: ${entry.duration}`);
-          if (entry.tags && entry.tags.length > 0) {
-            filteredLines.push(`    tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]`);
-          }
-        });
-      } else {
-        filteredLines.push(`${entriesKey}: []`);
-      }
-      filteredLines.push(`${totalTimeKey}: "${totalTimeFormatted}"`);
-      newContent = content.replace(frontmatterRegex, `---
-${filteredLines.join("\n")}
----`);
+        return true;
+      });
+      const newFM = filteredLines.join("\n") + "\n" + lapseFrontmatter;
+      const newContent = content.replace(/^---\n[\s\S]*?\n---/, `---
+${newFM}---`);
+      await this.app.vault.modify(file, newContent);
     } else {
-      const startTimeKey = this.settings.startTimeKey;
-      const endTimeKey = this.settings.endTimeKey;
-      const entriesKey = this.settings.entriesKey;
-      const totalTimeKey = this.settings.totalTimeKey;
-      const frontmatterLines = [];
-      if (startTime !== null) {
-        frontmatterLines.push(`${startTimeKey}: ${new Date(startTime).toISOString()}`);
-      }
-      if (endTime !== null) {
-        frontmatterLines.push(`${endTimeKey}: ${new Date(endTime).toISOString()}`);
-      }
-      if (entries.length > 0) {
-        frontmatterLines.push(`${entriesKey}:`);
-        entries.forEach((entry) => {
-          frontmatterLines.push(`  - label: "${entry.label.replace(/"/g, '\\"')}"`);
-          if (entry.start) {
-            frontmatterLines.push(`    start: ${entry.start}`);
-          }
-          if (entry.end) {
-            frontmatterLines.push(`    end: ${entry.end}`);
-          }
-          frontmatterLines.push(`    duration: ${entry.duration}`);
-          if (entry.tags && entry.tags.length > 0) {
-            frontmatterLines.push(`    tags: [${entry.tags.map((t) => `"${t}"`).join(", ")}]`);
-          }
-        });
-      } else {
-        frontmatterLines.push(`${entriesKey}: []`);
-      }
-      frontmatterLines.push(`${totalTimeKey}: "${totalTimeFormatted}"`);
-      const frontmatter = `---
-${frontmatterLines.join("\n")}
----
+      const newContent = `---
+${lapseFrontmatter}---
 
-`;
-      newContent = frontmatter + content;
+${content}`;
+      await this.app.vault.modify(file, newContent);
     }
-    await this.app.vault.modify(file, newContent);
     this.invalidateCacheForFile(filePath);
   }
   async activateView() {
@@ -1592,7 +1677,23 @@ ${frontmatterLines.join("\n")}
     }
     return activeTimers;
   }
-  onunload() {
+  async onunload() {
+    if (this.statusBarUpdateInterval) {
+      window.clearInterval(this.statusBarUpdateInterval);
+      this.statusBarUpdateInterval = null;
+    }
+    if (this.pendingSaves.length > 0) {
+      console.log(`Lapse: Waiting for ${this.pendingSaves.length} pending save(s) to complete...`);
+      await Promise.all(this.pendingSaves);
+    }
+    if (this.cacheSaveTimeout) {
+      clearTimeout(this.cacheSaveTimeout);
+      await this.saveData({
+        ...this.settings,
+        entryCache: this.entryCache
+      });
+      this.cacheSaveTimeout = null;
+    }
     console.log("Unloading Lapse plugin");
   }
   async loadSettings() {
@@ -1624,13 +1725,13 @@ ${frontmatterLines.join("\n")}
       if (finalCacheSize > 100) {
         this.cacheLoading = true;
         this.cacheLoaded = new Promise((resolve) => {
-          setTimeout(() => {
+          setTimeout(async () => {
             this.entryCache = data.entryCache;
             this.cacheLoading = false;
             const loadTime = Date.now() - startTime;
             console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
             if (finalCacheSize < cacheSize) {
-              this.saveCache();
+              await this.saveCache();
             }
             resolve();
           }, 0);
@@ -1652,13 +1753,25 @@ ${frontmatterLines.join("\n")}
     if (this.cacheSaveTimeout) {
       clearTimeout(this.cacheSaveTimeout);
     }
-    this.cacheSaveTimeout = window.setTimeout(async () => {
-      await this.saveData({
-        ...this.settings,
-        entryCache: this.entryCache
-      });
-      this.cacheSaveTimeout = null;
-    }, 2e3);
+    const savePromise = new Promise((resolve) => {
+      this.cacheSaveTimeout = window.setTimeout(async () => {
+        try {
+          await this.saveData({
+            ...this.settings,
+            entryCache: this.entryCache
+          });
+        } finally {
+          this.cacheSaveTimeout = null;
+          const index = this.pendingSaves.indexOf(savePromise);
+          if (index > -1) {
+            this.pendingSaves.splice(index, 1);
+          }
+          resolve();
+        }
+      }, 2e3);
+    });
+    this.pendingSaves.push(savePromise);
+    return savePromise;
   }
   invalidateCacheForFile(filePath) {
     delete this.entryCache[filePath];
@@ -2115,6 +2228,31 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Hide timestamps in views").setDesc("When enabled, removes the display of timestamps in note titles in Active Timers and Time Reports views. This does not change the name of any note, just hides the timestamp for cleaner display.").addToggle((toggle) => toggle.setValue(this.plugin.settings.hideTimestampsInViews).onChange(async (value) => {
       this.plugin.settings.hideTimestampsInViews = value;
       await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Show status bar").setDesc("Display active timer(s) in the status bar at the bottom of Obsidian").addToggle((toggle) => toggle.setValue(this.plugin.settings.showStatusBar).onChange(async (value) => {
+      this.plugin.settings.showStatusBar = value;
+      await this.plugin.saveSettings();
+      if (value) {
+        if (!this.plugin.statusBarItem) {
+          this.plugin.statusBarItem = this.plugin.addStatusBarItem();
+          this.plugin.statusBarItem.addClass("lapse-status-bar");
+        }
+        this.plugin.updateStatusBar();
+        if (!this.plugin.statusBarUpdateInterval) {
+          this.plugin.statusBarUpdateInterval = window.setInterval(() => {
+            this.plugin.updateStatusBar();
+          }, 1e3);
+        }
+      } else {
+        if (this.plugin.statusBarUpdateInterval) {
+          window.clearInterval(this.plugin.statusBarUpdateInterval);
+          this.plugin.statusBarUpdateInterval = null;
+        }
+        if (this.plugin.statusBarItem) {
+          this.plugin.statusBarItem.setText("");
+          this.plugin.statusBarItem.hide();
+        }
+      }
     }));
     new import_obsidian.Setting(containerEl).setName("First day of week").setDesc("Set the first day of the week for weekly reports").addDropdown((dropdown) => dropdown.addOption("0", "Sunday").addOption("1", "Monday").addOption("2", "Tuesday").addOption("3", "Wednesday").addOption("4", "Thursday").addOption("5", "Friday").addOption("6", "Saturday").setValue(this.plugin.settings.firstDayOfWeek.toString()).onChange(async (value) => {
       this.plugin.settings.firstDayOfWeek = parseInt(value);
