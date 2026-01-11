@@ -21,6 +21,8 @@ A lightweight, powerful time tracking plugin for Obsidian that combines elegant 
 ### Advanced Features
 - **Tag Support**: Add tags to time entries with automatic default tags
 - **Project Tracking**: Group entries by project from frontmatter
+- **Project Colors**: Assign colors to projects for visual organization in charts and labels
+- **Lapse Buttons**: Create inline buttons that generate new notes from templates
 - **Smart Default Labels**: Configure default labels from filename, frontmatter, or free text
 - **Timestamp Removal**: Option to automatically remove timestamps from filenames when using filename as label
 - **Entry Management**: Edit entries with modal dialogs, delete with confirmation
@@ -80,6 +82,51 @@ This shows a clean, single-line view for each active timer with:
 - **Stop button** - Stops the timer without opening the note
 
 Perfect for creating a dashboard note to monitor all active work across your vault.
+
+### Lapse Buttons
+
+Create quick-action buttons to start new notes from templates. First, create template files in a folder (default: `Templates/Lapse Buttons`). Each template can have a project in its frontmatter and an optional color field.
+
+In any note, create a button using inline code (backticks):
+
+```markdown
+`lapse:TemplateName`
+```
+
+**Note:** In source/edit mode, you'll see the raw inline code. Switch to reading/preview mode to see the rendered button.
+
+For example, if you have a template file `Templates/Lapse Buttons/Dishes.md`:
+
+```markdown
+`lapse:Dishes`
+```
+
+This creates a button that:
+- **Shows the template name** and project (if set in template frontmatter)
+- **Uses project color** for text and border (if project has a color field)
+- **Creates a new note** from the template with a timestamp when clicked
+- **Opens the new note** automatically
+
+#### Template Setup
+
+1. Create a folder for your templates (e.g., `Templates/Lapse Buttons`)
+2. Set the folder path in Settings → Lapse Button Templates
+3. Create template files with frontmatter:
+
+```markdown
+---
+project: "[[Household Chores]]"
+tags: [lapse, chores]
+---
+
+```lapse
+```
+
+## Notes
+- Task details here
+```
+
+The button will display "Dishes (Household Chores)" and use the project's color if the `Household Chores` note has a `color` field in its frontmatter.
 
 #### Query Options
 

@@ -50,12 +50,8 @@ var DEFAULT_SETTINGS = {
   // No folders excluded by default
   showStatusBar: true,
   // Show active timers in status bar by default
-  activityShowNoteTitle: true,
-  // Show note title in Activity view by default
-  activityShowProject: true,
-  // Show project in Activity view by default
-  activityShowEntryLabel: true
-  // Show entry label in Activity view by default
+  lapseButtonTemplatesFolder: "Templates/Lapse Buttons"
+  // Default folder for lapse button templates
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -95,7 +91,16 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     );
     this.registerMarkdownCodeBlockProcessor("lapse", this.processTimerCodeBlock.bind(this));
     this.registerMarkdownCodeBlockProcessor("lapse-report", this.processReportCodeBlock.bind(this));
-    this.registerMarkdownCodeBlockProcessor("lapse-active", this.processActiveTimersCodeBlock.bind(this));
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const codeElements = el.querySelectorAll("code");
+      codeElements.forEach((codeEl) => {
+        const text = codeEl.textContent || "";
+        if (text.startsWith("lapse:")) {
+          const templateName = text.substring("lapse:".length);
+          this.processLapseButton(codeEl, templateName, ctx);
+        }
+      });
+    });
     this.registerView(
       "lapse-sidebar",
       (leaf) => new LapseSidebarView(leaf, this)
@@ -104,11 +109,18 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       "lapse-reports",
       (leaf) => new LapseReportsView(leaf, this)
     );
+    this.registerView(
+      "lapse-buttons",
+      (leaf) => new LapseButtonsView(leaf, this)
+    );
     this.addRibbonIcon("clock", "Lapse: Show Activity", () => {
       this.activateView();
     });
     this.addRibbonIcon("bar-chart-2", "Lapse: Show Time Reports", () => {
       this.activateReportsView();
+    });
+    this.addRibbonIcon("play-circle", "Lapse: Show Quick Start", () => {
+      this.activateButtonsView();
     });
     this.addCommand({
       id: "insert-lapse-timer",
@@ -248,6 +260,22 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       name: "Show time reports",
       callback: () => {
         this.activateReportsView();
+      }
+    });
+    this.addCommand({
+      id: "show-lapse-buttons",
+      name: "Show quick start",
+      callback: () => {
+        this.activateButtonsView();
+      }
+    });
+    this.addCommand({
+      id: "insert-lapse-button",
+      name: "Insert template button",
+      editorCallback: (editor) => {
+        new LapseButtonModal(this.app, this, (templateName) => {
+          editor.replaceSelection(`\`lapse:${templateName}\``);
+        }).open();
       }
     });
     this.addSettingTab(new LapseSettingTab(this.app, this));
@@ -420,69 +448,31 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       const tagName = defaultTag.startsWith("#") ? defaultTag.substring(1) : defaultTag;
       if (match) {
         const frontmatter = match[1];
-        const lines = frontmatter.split("\n");
-        let tagsLineIndex = -1;
-        let isMultilineArray = false;
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (line.match(/^tags?:\s*$/)) {
-            tagsLineIndex = i;
-            isMultilineArray = true;
-            break;
-          } else if (line.match(/^tags?:\s+\[/)) {
-            tagsLineIndex = i;
-            isMultilineArray = false;
-            break;
-          } else if (line.match(/^tags?:\s+[^[\n]/)) {
-            tagsLineIndex = i;
-            isMultilineArray = false;
-            break;
+        if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
+          const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]\n]+)\]?/);
+          if (tagsMatch) {
+            const existingTags = tagsMatch[1].split(",").map((t) => t.trim().replace(/['"#]/g, ""));
+            if (existingTags.includes(tagName)) {
+              return;
+            }
           }
-        }
-        if (tagsLineIndex >= 0) {
-          if (isMultilineArray) {
-            let tagExists = false;
-            for (let i = tagsLineIndex + 1; i < lines.length; i++) {
-              const line = lines[i].trim();
-              if (!line.startsWith("-"))
-                break;
-              const existingTag = line.replace(/^-\s*/, "").replace(/['"]/g, "").trim();
-              if (existingTag === tagName) {
-                tagExists = true;
-                break;
-              }
-            }
-            if (!tagExists) {
-              lines.splice(tagsLineIndex + 1, 0, `  - ${tagName}`);
-              const newFrontmatter = lines.join("\n");
-              const newContent = content.replace(frontmatterRegex, `---
-${newFrontmatter}
----`);
-              await this.app.vault.modify(file, newContent);
-            }
-          } else {
-            const tagsLine = lines[tagsLineIndex];
-            const tagsMatch = tagsLine.match(/^tags?:\s*(.+)$/);
-            if (tagsMatch) {
-              const existingTagsStr = tagsMatch[1];
+          const newContent = content.replace(
+            /(^tags?:\s*)(.+?)$/m,
+            (match2, prefix, existingTagsStr) => {
               let tagList = [];
               const arrayMatch = existingTagsStr.match(/\[(.+)\]/);
               if (arrayMatch) {
                 tagList = arrayMatch[1].split(",").map((t) => t.trim().replace(/['"#]/g, "")).filter((t) => t);
               } else {
-                tagList = [existingTagsStr.trim().replace(/['"#]/g, "")];
+                tagList = existingTagsStr.split(/[\s,]+/).map((t) => t.trim().replace(/['"#]/g, "")).filter((t) => t);
               }
               if (!tagList.includes(tagName)) {
                 tagList.push(tagName);
-                lines[tagsLineIndex] = `tags: [${tagList.map((t) => `"${t}"`).join(", ")}]`;
-                const newFrontmatter = lines.join("\n");
-                const newContent = content.replace(frontmatterRegex, `---
-${newFrontmatter}
----`);
-                await this.app.vault.modify(file, newContent);
               }
+              return `${prefix}[${tagList.map((t) => `"${t}"`).join(", ")}]`;
             }
-          }
+          );
+          await this.app.vault.modify(file, newContent);
         } else {
           const newFrontmatter = frontmatter + `
 tags: ["${tagName}"]`;
@@ -631,6 +621,143 @@ ${content}`;
       }
     } catch (error) {
       console.error("Error reading frontmatter for project:", error);
+    }
+    return null;
+  }
+  async processLapseButton(codeEl, templateName, ctx) {
+    const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
+    const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+    if (!templateFile || !(templateFile instanceof import_obsidian.TFile)) {
+      const errorBtn = document.createElement("button");
+      errorBtn.className = "lapse-button lapse-button-error";
+      errorBtn.textContent = `\u26A0\uFE0F Template not found: ${templateName}`;
+      errorBtn.title = `Looking for: ${templatePath}`;
+      errorBtn.disabled = true;
+      codeEl.replaceWith(errorBtn);
+      return;
+    }
+    let project = null;
+    try {
+      const content = await this.app.vault.read(templateFile);
+      const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+      const match = content.match(frontmatterRegex);
+      if (match) {
+        const frontmatter = match[1];
+        const lines = frontmatter.split("\n");
+        for (const line of lines) {
+          if (line.trim().startsWith(this.settings.projectKey + ":")) {
+            project = line.split(":").slice(1).join(":").trim();
+            if (project) {
+              project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
+              project = project.replace(/^["']+|["']+$/g, "");
+              project = project.trim();
+            }
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error reading template:", error);
+    }
+    let projectColor = null;
+    if (project) {
+      projectColor = await this.getProjectColor(project);
+    }
+    const button = document.createElement("button");
+    button.className = "lapse-button";
+    const topLine = document.createElement("div");
+    topLine.className = "lapse-button-name";
+    topLine.textContent = templateName;
+    button.appendChild(topLine);
+    if (project) {
+      const bottomLine = document.createElement("div");
+      bottomLine.className = "lapse-button-project";
+      bottomLine.textContent = project;
+      button.appendChild(bottomLine);
+    }
+    if (projectColor) {
+      button.style.borderLeftColor = projectColor;
+      if (project) {
+        const bottomLine = button.querySelector(".lapse-button-project");
+        if (bottomLine) {
+          bottomLine.style.backgroundColor = projectColor;
+          const contrastColor = this.getContrastColor(projectColor);
+          bottomLine.style.color = contrastColor;
+        }
+      }
+    }
+    button.onclick = async () => {
+      try {
+        const templateContent = await this.app.vault.read(templateFile);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
+        const newNoteName = `${templateName} ${timestamp}`;
+        const newNotePath = `${newNoteName}.md`;
+        const newFile = await this.app.vault.create(newNotePath, templateContent);
+        await this.app.workspace.getLeaf(false).openFile(newFile);
+      } catch (error) {
+        console.error("Error creating note from template:", error);
+      }
+    };
+    codeEl.replaceWith(button);
+  }
+  // Helper to get contrasting text color for a background color
+  getContrastColor(hexColor) {
+    const hex = hexColor.replace("#", "");
+    const r = parseInt(hex.substr(0, 2), 16);
+    const g = parseInt(hex.substr(2, 2), 16);
+    const b = parseInt(hex.substr(4, 2), 16);
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.5 ? "#000000" : "#ffffff";
+  }
+  // Helper to convert hex color to RGBA with opacity
+  hexToRGBA(hexColor, opacity) {
+    const hex = hexColor.replace("#", "");
+    let r, g, b;
+    if (hex.length === 3) {
+      r = parseInt(hex[0] + hex[0], 16);
+      g = parseInt(hex[1] + hex[1], 16);
+      b = parseInt(hex[2] + hex[2], 16);
+    } else if (hex.length === 6) {
+      r = parseInt(hex.substr(0, 2), 16);
+      g = parseInt(hex.substr(2, 2), 16);
+      b = parseInt(hex.substr(4, 2), 16);
+    } else {
+      return null;
+    }
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+  }
+  async getProjectColor(projectName) {
+    if (!projectName) {
+      return null;
+    }
+    const file = this.app.metadataCache.getFirstLinkpathDest(projectName, "");
+    if (!file || !(file instanceof import_obsidian.TFile)) {
+      return null;
+    }
+    try {
+      const content = await this.app.vault.read(file);
+      const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+      const match = content.match(frontmatterRegex);
+      if (!match) {
+        return null;
+      }
+      const frontmatter = match[1];
+      const lines = frontmatter.split("\n");
+      const colorKeys = ["color", "colour", "lapse-color"];
+      for (const key of colorKeys) {
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith(`${key}:`)) {
+            let value = line.replace(new RegExp(`^${key}:\\s*`), "").trim();
+            value = value.replace(/^["']+|["']+$/g, "");
+            if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/)) {
+              return value;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error reading project color:", error);
     }
     return null;
   }
@@ -1363,108 +1490,6 @@ ${content}`;
       svg.appendChild(foreignObject);
     });
   }
-  async processActiveTimersCodeBlock(source, el, ctx) {
-    const container = el.createDiv({ cls: "lapse-active-container" });
-    const renderActiveTimers = async () => {
-      container.empty();
-      const activeTimers = [];
-      const currentFile = this.app.workspace.getActiveFile();
-      if (currentFile) {
-        const currentFilePath = currentFile.path;
-        await this.loadEntriesFromFrontmatter(currentFilePath);
-        const currentPageData = this.timeData.get(currentFilePath);
-        if (currentPageData) {
-          currentPageData.entries.forEach((entry) => {
-            if (entry.startTime && !entry.endTime) {
-              activeTimers.push({ filePath: currentFilePath, entry });
-            }
-          });
-        }
-      }
-      this.timeData.forEach((pageData, filePath) => {
-        if (currentFile && filePath === currentFile.path) {
-          return;
-        }
-        pageData.entries.forEach((entry) => {
-          if (entry.startTime && !entry.endTime) {
-            activeTimers.push({ filePath, entry });
-          }
-        });
-      });
-      const markdownFiles = this.app.vault.getMarkdownFiles();
-      for (const file of markdownFiles) {
-        const filePath = file.path;
-        if (this.isFileExcluded(filePath)) {
-          continue;
-        }
-        if (this.timeData.has(filePath)) {
-          continue;
-        }
-        const { entries } = await this.getCachedOrLoadEntries(filePath);
-        entries.forEach((entry) => {
-          if (entry.startTime && !entry.endTime) {
-            activeTimers.push({ filePath, entry });
-          }
-        });
-      }
-      if (activeTimers.length === 0) {
-        container.createEl("p", { text: "No active timers", cls: "lapse-active-empty" });
-        return;
-      }
-      for (const { filePath, entry } of activeTimers) {
-        const row = container.createDiv({ cls: "lapse-active-row" });
-        const elapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
-        const timeText = this.formatTimeAsHHMMSS(elapsed);
-        const timeDisplay = row.createDiv({
-          text: timeText,
-          cls: "lapse-active-time"
-        });
-        const labelDisplay = row.createDiv({
-          text: entry.label,
-          cls: "lapse-active-label"
-        });
-        const actionsContainer = row.createDiv({ cls: "lapse-active-actions" });
-        const jumpBtn = actionsContainer.createEl("button", {
-          cls: "lapse-active-btn lapse-active-btn-jump",
-          attr: { "aria-label": "Jump to note" }
-        });
-        (0, import_obsidian.setIcon)(jumpBtn, "arrow-right");
-        jumpBtn.onclick = async () => {
-          await this.app.workspace.openLinkText(filePath, "", true);
-        };
-        const stopBtn = actionsContainer.createEl("button", {
-          cls: "lapse-active-btn lapse-active-btn-stop",
-          attr: { "aria-label": "Stop timer" }
-        });
-        (0, import_obsidian.setIcon)(stopBtn, "square");
-        stopBtn.onclick = async (e) => {
-          e.stopPropagation();
-          entry.endTime = Date.now();
-          entry.duration += Date.now() - entry.startTime;
-          entry.startTime = null;
-          await this.updateFrontmatter(filePath);
-          await renderActiveTimers();
-        };
-        const intervalId = window.setInterval(() => {
-          if (entry.startTime && !entry.endTime) {
-            const newElapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
-            timeDisplay.setText(this.formatTimeAsHHMMSS(newElapsed));
-          } else {
-            window.clearInterval(intervalId);
-          }
-        }, 1e3);
-      }
-    };
-    await renderActiveTimers();
-    const refreshInterval = window.setInterval(async () => {
-      await renderActiveTimers();
-    }, 5e3);
-    ctx.addChild({
-      unload: () => {
-        window.clearInterval(refreshInterval);
-      }
-    });
-  }
   renderEntryCards(cardsContainer, entries, filePath, labelDisplay, labelInput) {
     cardsContainer.empty();
     entries.forEach((entry) => {
@@ -1807,6 +1832,20 @@ ${content}`;
       workspace.revealLeaf(leaf);
     }
   }
+  async activateButtonsView() {
+    const { workspace } = this.app;
+    let leaf = null;
+    const leaves = workspace.getLeavesOfType("lapse-buttons");
+    if (leaves.length > 0) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      await (leaf == null ? void 0 : leaf.setViewState({ type: "lapse-buttons", active: true }));
+    }
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
   async getActiveTimers() {
     const activeTimers = [];
     this.timeData.forEach((pageData, filePath) => {
@@ -1923,7 +1962,7 @@ ${content}`;
   }
 };
 var LapseSidebarView = class extends import_obsidian.ItemView {
-  // Toggle for showing/hiding the chart section
+  // Counter for periodic full refreshes
   constructor(leaf, plugin) {
     super(leaf);
     this.refreshInterval = null;
@@ -1932,10 +1971,6 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     this.showTodayEntries = true;
     // Toggle for showing/hiding individual entries
     this.refreshCounter = 0;
-    // Counter for periodic full refreshes
-    this.showEntriesList = true;
-    // Toggle for showing/hiding the entries list section
-    this.showChart = true;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1957,26 +1992,7 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     this.timeDisplays.clear();
     const header = container.createDiv({ cls: "lapse-sidebar-header" });
     header.createEl("h4", { text: "Activity" });
-    const headerButtons = header.createDiv({ cls: "lapse-sidebar-header-buttons" });
-    const listBtn = headerButtons.createEl("button", {
-      cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showEntriesList ? "active" : ""}`,
-      attr: { "aria-label": "Toggle entries list" }
-    });
-    (0, import_obsidian.setIcon)(listBtn, "list");
-    listBtn.onclick = () => {
-      this.showEntriesList = !this.showEntriesList;
-      this.render();
-    };
-    const chartBtn = headerButtons.createEl("button", {
-      cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showChart ? "active" : ""}`,
-      attr: { "aria-label": "Toggle chart" }
-    });
-    (0, import_obsidian.setIcon)(chartBtn, "pie-chart");
-    chartBtn.onclick = () => {
-      this.showChart = !this.showChart;
-      this.render();
-    };
-    const refreshBtn = headerButtons.createEl("button", {
+    const refreshBtn = header.createEl("button", {
       cls: "lapse-sidebar-refresh-btn clickable-icon",
       attr: { "aria-label": "Refresh" }
     });
@@ -1998,158 +2014,133 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     } else {
       for (const { filePath, entry } of activeTimers) {
         const card = container.createDiv({ cls: "lapse-activity-card" });
-        const cardHeader = card.createDiv({ cls: "lapse-activity-card-header" });
         const elapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
         const timeText = this.plugin.formatTimeAsHHMMSS(elapsed);
-        const timerDisplay = cardHeader.createDiv({
+        const timerDisplay = card.createDiv({
           text: timeText,
           cls: "lapse-activity-timer"
         });
         this.timeDisplays.set(entry.id, timerDisplay);
-        const stopBtn = cardHeader.createEl("button", {
-          cls: "lapse-activity-stop-btn",
-          attr: { "aria-label": "Stop timer" }
-        });
-        (0, import_obsidian.setIcon)(stopBtn, "square");
-        stopBtn.onclick = async (e) => {
-          e.stopPropagation();
-          entry.endTime = Date.now();
-          entry.duration += Date.now() - entry.startTime;
-          entry.startTime = null;
-          await this.plugin.updateFrontmatter(filePath);
-          await this.render();
-        };
         const file = this.app.vault.getAbstractFileByPath(filePath);
         let fileName = file && file instanceof import_obsidian.TFile ? file.basename : ((_a = filePath.split("/").pop()) == null ? void 0 : _a.replace(".md", "")) || filePath;
         if (this.plugin.settings.hideTimestampsInViews) {
           fileName = this.plugin.removeTimestampFromFileName(fileName);
         }
         const detailsContainer = card.createDiv({ cls: "lapse-activity-details" });
-        if (this.plugin.settings.activityShowNoteTitle) {
-          const link = detailsContainer.createEl("a", {
-            text: fileName,
-            cls: "lapse-activity-page internal-link",
-            href: filePath
-          });
-          link.onclick = (e) => {
-            e.preventDefault();
-            const file2 = this.app.vault.getAbstractFileByPath(filePath);
-            if (file2 && file2 instanceof import_obsidian.TFile) {
-              this.app.workspace.openLinkText(filePath, "", false);
-            }
-          };
-        }
+        const link = detailsContainer.createEl("a", {
+          text: fileName,
+          cls: "lapse-activity-page internal-link",
+          href: filePath
+        });
+        link.onclick = (e) => {
+          e.preventDefault();
+          const file2 = this.app.vault.getAbstractFileByPath(filePath);
+          if (file2 && file2 instanceof import_obsidian.TFile) {
+            this.app.workspace.openLinkText(filePath, "", false);
+          }
+        };
         const project = await this.plugin.getProjectFromFrontmatter(filePath);
-        if (project && this.plugin.settings.activityShowProject) {
+        if (project) {
           detailsContainer.createDiv({ text: project, cls: "lapse-activity-project" });
         }
-        if (this.plugin.settings.activityShowEntryLabel) {
-          detailsContainer.createDiv({ text: entry.label, cls: "lapse-activity-label" });
+        detailsContainer.createDiv({ text: entry.label, cls: "lapse-activity-label" });
+      }
+    }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStart = today.getTime();
+    const todayEntries = [];
+    this.plugin.timeData.forEach((pageData, filePath) => {
+      pageData.entries.forEach((entry) => {
+        if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+          todayEntries.push({ filePath, entry, startTime: entry.startTime });
+        }
+      });
+    });
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    for (const file of markdownFiles) {
+      const filePath = file.path;
+      if (this.plugin.isFileExcluded(filePath)) {
+        continue;
+      }
+      if (this.plugin.timeData.has(filePath)) {
+        continue;
+      }
+      const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
+      for (const entry of fileEntries) {
+        if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+          todayEntries.push({ filePath, entry, startTime: entry.startTime });
         }
       }
     }
-    if (this.showEntriesList) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayStart = today.getTime();
-      const todayEntries = [];
-      this.plugin.timeData.forEach((pageData, filePath) => {
-        pageData.entries.forEach((entry) => {
-          if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
-            todayEntries.push({ filePath, entry, startTime: entry.startTime });
-          }
-        });
-      });
-      const markdownFiles = this.app.vault.getMarkdownFiles();
-      for (const file of markdownFiles) {
-        const filePath = file.path;
-        if (this.plugin.isFileExcluded(filePath)) {
-          continue;
-        }
-        if (this.plugin.timeData.has(filePath)) {
-          continue;
-        }
-        const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
-        for (const entry of fileEntries) {
-          if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
-            todayEntries.push({ filePath, entry, startTime: entry.startTime });
-          }
-        }
+    const entriesByNote = /* @__PURE__ */ new Map();
+    todayEntries.forEach(({ filePath, entry, startTime }) => {
+      if (!entriesByNote.has(filePath)) {
+        entriesByNote.set(filePath, []);
       }
-      const entriesByNote = /* @__PURE__ */ new Map();
-      todayEntries.forEach(({ filePath, entry, startTime }) => {
-        if (!entriesByNote.has(filePath)) {
-          entriesByNote.set(filePath, []);
+      entriesByNote.get(filePath).push({ entry, startTime });
+    });
+    entriesByNote.forEach((entries) => {
+      entries.sort((a, b) => b.startTime - a.startTime);
+    });
+    const noteGroups = Array.from(entriesByNote.entries()).map(([filePath, entries]) => {
+      const totalTime = entries.reduce((sum, { entry }) => sum + entry.duration, 0);
+      const newestStartTime = Math.max(...entries.map((e) => e.startTime));
+      return { filePath, entries, totalTime, newestStartTime };
+    });
+    noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
+    if (noteGroups.length > 0) {
+      const sectionHeader = container.createDiv({ cls: "lapse-sidebar-section-header" });
+      sectionHeader.createEl("h4", { text: "Today's Entries", cls: "lapse-sidebar-section-title" });
+      const toggleBtn = sectionHeader.createEl("button", {
+        cls: "lapse-sidebar-toggle-btn clickable-icon",
+        attr: { "aria-label": this.showTodayEntries ? "Hide entries" : "Show entries" }
+      });
+      (0, import_obsidian.setIcon)(toggleBtn, this.showTodayEntries ? "chevron-down" : "chevron-right");
+      toggleBtn.onclick = () => {
+        this.showTodayEntries = !this.showTodayEntries;
+        this.render();
+      };
+      const todayList = container.createEl("ul", { cls: "lapse-sidebar-list" });
+      for (const { filePath, entries, totalTime } of noteGroups) {
+        const item = todayList.createEl("li", { cls: "lapse-sidebar-note-group" });
+        const topLine = item.createDiv({ cls: "lapse-sidebar-top-line" });
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        let fileName = file && file instanceof import_obsidian.TFile ? file.basename : ((_b = filePath.split("/").pop()) == null ? void 0 : _b.replace(".md", "")) || filePath;
+        if (this.plugin.settings.hideTimestampsInViews) {
+          fileName = this.plugin.removeTimestampFromFileName(fileName);
         }
-        entriesByNote.get(filePath).push({ entry, startTime });
-      });
-      entriesByNote.forEach((entries) => {
-        entries.sort((a, b) => b.startTime - a.startTime);
-      });
-      const noteGroups = Array.from(entriesByNote.entries()).map(([filePath, entries]) => {
-        const totalTime = entries.reduce((sum, { entry }) => sum + entry.duration, 0);
-        const newestStartTime = Math.max(...entries.map((e) => e.startTime));
-        return { filePath, entries, totalTime, newestStartTime };
-      });
-      noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
-      if (noteGroups.length > 0) {
-        const sectionHeader = container.createDiv({ cls: "lapse-sidebar-section-header" });
-        sectionHeader.createEl("h4", { text: "Today's Entries", cls: "lapse-sidebar-section-title" });
-        const toggleBtn = sectionHeader.createEl("button", {
-          cls: "lapse-sidebar-toggle-btn clickable-icon",
-          attr: { "aria-label": this.showTodayEntries ? "Hide entries" : "Show entries" }
+        const link = topLine.createEl("a", {
+          text: fileName,
+          cls: "internal-link",
+          href: filePath
         });
-        (0, import_obsidian.setIcon)(toggleBtn, this.showTodayEntries ? "chevron-down" : "chevron-right");
-        toggleBtn.onclick = () => {
-          this.showTodayEntries = !this.showTodayEntries;
-          this.render();
+        link.onclick = (e) => {
+          e.preventDefault();
+          const file2 = this.app.vault.getAbstractFileByPath(filePath);
+          if (file2 && file2 instanceof import_obsidian.TFile) {
+            this.app.workspace.openLinkText(filePath, "", false);
+          }
         };
-        const todayList = container.createEl("ul", { cls: "lapse-sidebar-list" });
-        for (const { filePath, entries, totalTime } of noteGroups) {
-          const item = todayList.createEl("li", { cls: "lapse-sidebar-note-group" });
-          const topLine = item.createDiv({ cls: "lapse-sidebar-top-line" });
-          const file = this.app.vault.getAbstractFileByPath(filePath);
-          let fileName = file && file instanceof import_obsidian.TFile ? file.basename : ((_b = filePath.split("/").pop()) == null ? void 0 : _b.replace(".md", "")) || filePath;
-          if (this.plugin.settings.hideTimestampsInViews) {
-            fileName = this.plugin.removeTimestampFromFileName(fileName);
-          }
-          const link = topLine.createEl("a", {
-            text: fileName,
-            cls: "internal-link",
-            href: filePath
+        const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
+        topLine.createSpan({ text: timeText, cls: "lapse-sidebar-time" });
+        const project = await this.plugin.getProjectFromFrontmatter(filePath);
+        if (project) {
+          const secondLine = item.createDiv({ cls: "lapse-sidebar-second-line" });
+          secondLine.createSpan({ text: project, cls: "lapse-sidebar-project" });
+        }
+        if (this.showTodayEntries) {
+          const entriesList = item.createDiv({ cls: "lapse-sidebar-entries-list" });
+          entries.forEach(({ entry }) => {
+            const entryLine = entriesList.createDiv({ cls: "lapse-sidebar-entry-line" });
+            const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
+            entryLine.createSpan({ text: entry.label, cls: "lapse-sidebar-entry-label" });
+            entryLine.createSpan({ text: entryTime, cls: "lapse-sidebar-entry-time" });
           });
-          link.onclick = (e) => {
-            e.preventDefault();
-            const file2 = this.app.vault.getAbstractFileByPath(filePath);
-            if (file2 && file2 instanceof import_obsidian.TFile) {
-              this.app.workspace.openLinkText(filePath, "", false);
-            }
-          };
-          const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
-          topLine.createSpan({ text: timeText, cls: "lapse-sidebar-time" });
-          const project = await this.plugin.getProjectFromFrontmatter(filePath);
-          if (project) {
-            const secondLine = item.createDiv({ cls: "lapse-sidebar-second-line" });
-            secondLine.createSpan({ text: project, cls: "lapse-sidebar-project" });
-          }
-          if (this.showTodayEntries) {
-            const entriesList = item.createDiv({ cls: "lapse-sidebar-entries-list" });
-            entries.forEach(({ entry }) => {
-              const entryLine = entriesList.createDiv({ cls: "lapse-sidebar-entry-line" });
-              const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
-              entryLine.createSpan({ text: entry.label, cls: "lapse-sidebar-entry-label" });
-              entryLine.createSpan({ text: entryTime, cls: "lapse-sidebar-entry-time" });
-            });
-          }
         }
       }
     }
-    if (this.showChart) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayStart = today.getTime();
-      await this.renderPieChart(container, todayStart);
-    }
+    await this.renderPieChart(container, todayStart);
     if (this.refreshInterval) {
       clearInterval(this.refreshInterval);
     }
@@ -2159,7 +2150,7 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
   }
   async updateTimers() {
     this.refreshCounter++;
-    if (this.refreshCounter >= 60) {
+    if (this.refreshCounter >= 10) {
       this.refreshCounter = 0;
       this.plugin.timeData.forEach((pageData, filePath) => {
         this.plugin.invalidateCacheForFile(filePath);
@@ -2337,6 +2328,182 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     }
   }
 };
+var LapseButtonsView = class extends import_obsidian.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return "lapse-buttons";
+  }
+  getDisplayText() {
+    return "Quick Start";
+  }
+  getIcon() {
+    return "play-circle";
+  }
+  async onOpen() {
+    await this.render();
+  }
+  async onClose() {
+  }
+  async render() {
+    const container = this.containerEl.children[1];
+    container.empty();
+    container.addClass("lapse-buttons-view");
+    const header = container.createDiv({ cls: "lapse-buttons-header" });
+    header.createEl("h2", { text: "Quick Start" });
+    const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
+    const files = this.app.vault.getMarkdownFiles();
+    const templates = files.filter((file) => file.path.startsWith(templateFolder + "/"));
+    if (templates.length === 0) {
+      container.createEl("p", {
+        text: `No templates found in ${templateFolder}. Configure your template folder in Lapse settings.`,
+        cls: "lapse-buttons-empty"
+      });
+      return;
+    }
+    const templateDataList = [];
+    for (const template of templates) {
+      const templateName = template.basename;
+      let project = null;
+      let projectColor = null;
+      try {
+        const content = await this.app.vault.read(template);
+        const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+        const match = content.match(frontmatterRegex);
+        if (match) {
+          const frontmatter = match[1];
+          const lines = frontmatter.split("\n");
+          for (const line of lines) {
+            if (line.trim().startsWith(this.plugin.settings.projectKey + ":")) {
+              project = line.split(":").slice(1).join(":").trim();
+              if (project) {
+                project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
+                project = project.replace(/^["']+|["']+$/g, "");
+                project = project.trim();
+              }
+              break;
+            }
+          }
+        }
+        if (project) {
+          projectColor = await this.plugin.getProjectColor(project);
+        }
+      } catch (error) {
+        console.error("Error reading template:", error);
+      }
+      templateDataList.push({
+        template,
+        templateName,
+        project,
+        projectColor
+      });
+    }
+    const grouped = /* @__PURE__ */ new Map();
+    for (const data of templateDataList) {
+      const projectKey = data.project || "No Project";
+      if (!grouped.has(projectKey)) {
+        grouped.set(projectKey, []);
+      }
+      grouped.get(projectKey).push(data);
+    }
+    const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
+      if (a === "No Project")
+        return 1;
+      if (b === "No Project")
+        return -1;
+      return a.localeCompare(b);
+    });
+    for (const projectKey of sortedProjects) {
+      const projectTemplates = grouped.get(projectKey);
+      const projectSection = container.createDiv({ cls: "lapse-buttons-project-section" });
+      const projectHeader = projectSection.createDiv({ cls: "lapse-buttons-project-header" });
+      if (projectKey !== "No Project") {
+        const projectColor = projectTemplates[0].projectColor;
+        projectHeader.createEl("h3", {
+          text: projectKey,
+          cls: "lapse-buttons-project-title"
+        });
+        if (projectColor) {
+          projectHeader.style.borderLeftColor = projectColor;
+          projectHeader.querySelector("h3").style.color = projectColor;
+        }
+      } else {
+        projectHeader.createEl("h3", {
+          text: projectKey,
+          cls: "lapse-buttons-project-title"
+        });
+      }
+      const buttonsGrid = projectSection.createDiv({ cls: "lapse-buttons-grid" });
+      for (const data of projectTemplates) {
+        const button = buttonsGrid.createEl("button", { cls: "lapse-button" });
+        const titleEl = button.createDiv({ cls: "lapse-button-name" });
+        titleEl.textContent = data.templateName;
+        if (data.project) {
+          const projectEl = button.createDiv({ cls: "lapse-button-project" });
+          projectEl.textContent = data.project;
+          if (data.projectColor) {
+            button.style.borderLeftColor = data.projectColor;
+            projectEl.style.backgroundColor = data.projectColor;
+            const contrastColor = this.plugin.getContrastColor(data.projectColor);
+            projectEl.style.color = contrastColor;
+          }
+        }
+        button.onclick = async () => {
+          try {
+            const templateContent = await this.app.vault.read(data.template);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
+            const newNoteName = `${data.templateName} ${timestamp}`;
+            const newNotePath = `${newNoteName}.md`;
+            const newFile = await this.app.vault.create(newNotePath, templateContent);
+            await this.app.workspace.getLeaf(false).openFile(newFile);
+          } catch (error) {
+            console.error("Error creating note from template:", error);
+          }
+        };
+      }
+    }
+  }
+};
+var LapseButtonModal = class extends import_obsidian.Modal {
+  constructor(app, plugin, onChoose) {
+    super(app);
+    this.plugin = plugin;
+    this.onChoose = onChoose;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Select template" });
+    const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
+    const files = this.app.vault.getMarkdownFiles();
+    const templates = files.filter((file) => file.path.startsWith(templateFolder + "/"));
+    if (templates.length === 0) {
+      contentEl.createEl("p", {
+        text: `No templates found in ${templateFolder}`,
+        cls: "mod-warning"
+      });
+      return;
+    }
+    const templateList = contentEl.createDiv({ cls: "lapse-template-list" });
+    templates.forEach((template) => {
+      const templateName = template.basename;
+      const button = templateList.createEl("button", {
+        text: templateName,
+        cls: "lapse-template-option"
+      });
+      button.onclick = () => {
+        this.onChoose(templateName);
+        this.close();
+      };
+    });
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+};
 var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -2416,19 +2583,6 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       }
     }));
-    containerEl.createEl("h4", { text: "Activity View" });
-    new import_obsidian.Setting(containerEl).setName("Show note title").setDesc("Display the note title in active timer cards").addToggle((toggle) => toggle.setValue(this.plugin.settings.activityShowNoteTitle).onChange(async (value) => {
-      this.plugin.settings.activityShowNoteTitle = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Show project").setDesc("Display the project name in active timer cards").addToggle((toggle) => toggle.setValue(this.plugin.settings.activityShowProject).onChange(async (value) => {
-      this.plugin.settings.activityShowProject = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Show time entry label").setDesc("Display the entry label in active timer cards").addToggle((toggle) => toggle.setValue(this.plugin.settings.activityShowEntryLabel).onChange(async (value) => {
-      this.plugin.settings.activityShowEntryLabel = value;
-      await this.plugin.saveSettings();
-    }));
     new import_obsidian.Setting(containerEl).setName("First day of week").setDesc("Set the first day of the week for weekly reports").addDropdown((dropdown) => dropdown.addOption("0", "Sunday").addOption("1", "Monday").addOption("2", "Tuesday").addOption("3", "Wednesday").addOption("4", "Thursday").addOption("5", "Friday").addOption("6", "Saturday").setValue(this.plugin.settings.firstDayOfWeek.toString()).onChange(async (value) => {
       this.plugin.settings.firstDayOfWeek = parseInt(value);
       await this.plugin.saveSettings();
@@ -2442,6 +2596,14 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.defaultTagOnTimeEntries = value;
       await this.plugin.saveSettings();
     }));
+    containerEl.createEl("h3", { text: "Lapse Button Templates" });
+    new import_obsidian.Setting(containerEl).setName("Templates folder").setDesc("Folder path containing templates for lapse-button inline buttons (e.g., Templates/Lapse Buttons). Templates should be in your vault's template folder.").addText((text) => text.setPlaceholder("Templates/Lapse Buttons").setValue(this.plugin.settings.lapseButtonTemplatesFolder).onChange(async (value) => {
+      this.plugin.settings.lapseButtonTemplatesFolder = value;
+      await this.plugin.saveSettings();
+    }));
+    containerEl.createDiv({ cls: "setting-item-description" }).createEl("p", {
+      text: "Create buttons in notes using inline code: `lapse:TemplateName`. The button will create a new note from the template and open it."
+    });
     containerEl.createEl("h3", { text: "Timer Controls" });
     new import_obsidian.Setting(containerEl).setName("Show seconds").setDesc("Display seconds in timer").addToggle((toggle) => toggle.setValue(this.plugin.settings.showSeconds).onChange(async (value) => {
       this.plugin.settings.showSeconds = value;
@@ -2524,6 +2686,7 @@ This will delete all cached time entries. Your timer data in notes is safe. The 
   }
 };
 var LapseReportsView = class extends import_obsidian.ItemView {
+  // Track which groups are expanded
   constructor(leaf, plugin) {
     super(leaf);
     this.dateFilter = "today";
@@ -2532,11 +2695,6 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     this.groupBy = "note";
     this.secondaryGroupBy = "none";
     this.expandedGroups = /* @__PURE__ */ new Set();
-    // Track which groups are expanded
-    this.chartType = "pie";
-    // Chart type preference
-    // Cache raw entries (only invalidate when date range changes)
-    this.cachedRawEntries = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -2568,7 +2726,6 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     dateFilterSelect.value = this.dateFilter;
     dateFilterSelect.onchange = async () => {
       this.dateFilter = dateFilterSelect.value;
-      this.cachedRawEntries = null;
       await this.render();
     };
     const groupBySetting = controlsContainer.createDiv({ cls: "lapse-reports-groupby" });
@@ -2581,7 +2738,7 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     groupBySelect.value = this.groupBy;
     groupBySelect.onchange = async () => {
       this.groupBy = groupBySelect.value;
-      await this.renderTable();
+      await this.render();
     };
     const secondaryGroupBySetting = controlsContainer.createDiv({ cls: "lapse-reports-groupby" });
     secondaryGroupBySetting.createEl("label", { text: "Then by: " });
@@ -2594,7 +2751,7 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     secondaryGroupBySelect.value = this.secondaryGroupBy;
     secondaryGroupBySelect.onchange = async () => {
       this.secondaryGroupBy = secondaryGroupBySelect.value;
-      await this.renderTable();
+      await this.render();
     };
     if (this.dateFilter === "custom") {
       const customDateRow = container.createDiv({ cls: "lapse-reports-custom-date" });
@@ -2617,23 +2774,9 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       applyBtn.onclick = async () => {
         this.customStartDate = startDateInput.value;
         this.customEndDate = endDateInput.value;
-        this.cachedRawEntries = null;
         await this.render();
       };
     }
-    await this.renderTable();
-  }
-  async renderTable() {
-    const container = this.containerEl.children[1];
-    const existingSummary = container.querySelector(".lapse-reports-summary");
-    const existingTable = container.querySelector(".lapse-reports-table-container");
-    const existingChart = container.querySelector(".lapse-reports-chart-container");
-    if (existingSummary)
-      existingSummary.remove();
-    if (existingTable)
-      existingTable.remove();
-    if (existingChart)
-      existingChart.remove();
     const data = await this.getReportData();
     const summary = container.createDiv({ cls: "lapse-reports-summary" });
     const totalTime = data.reduce((sum, item) => sum + item.totalTime, 0);
@@ -2644,14 +2787,10 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     const headerRow = thead.createEl("tr");
     headerRow.createEl("th", { text: "" });
     headerRow.createEl("th", { text: this.getGroupByLabel() });
-    const showProjectColumn = this.groupBy !== "project";
-    if (showProjectColumn) {
-      headerRow.createEl("th", { text: "Project" });
-    }
+    headerRow.createEl("th", { text: "Project" });
     headerRow.createEl("th", { text: "Tags" });
     headerRow.createEl("th", { text: "Time" });
-    const lastColumnHeader = this.groupBy === "note" ? "Entries" : "Note";
-    headerRow.createEl("th", { text: lastColumnHeader });
+    headerRow.createEl("th", { text: "Entries" });
     const tbody = table.createEl("tbody");
     const sortedData = [...data].sort((a, b) => b.totalTime - a.totalTime);
     for (const item of sortedData) {
@@ -2661,103 +2800,60 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       const groupId = `group-${item.group}`;
       const isExpanded = this.expandedGroups.has(groupId);
       (0, import_obsidian.setIcon)(expandBtn, isExpanded ? "chevron-down" : "chevron-right");
-      const groupCell = row.createEl("td", { cls: "lapse-reports-group-name" });
-      if (this.groupBy === "note" && item.entries.length > 0) {
-        const link = groupCell.createEl("a", {
-          text: item.group,
-          cls: "lapse-reports-link"
-        });
-        link.onclick = async (e) => {
-          e.stopPropagation();
-          const filePath = item.entries[0].filePath;
-          await this.plugin.app.workspace.openLinkText(filePath, "", true);
-        };
-      } else if (this.groupBy === "project" && item.entries.length > 0) {
-        const link = groupCell.createEl("a", {
-          text: item.group,
-          cls: "lapse-reports-link"
-        });
-        link.onclick = async (e) => {
-          e.stopPropagation();
-          await this.plugin.app.workspace.openLinkText(item.group, "", true);
-        };
-      } else {
-        groupCell.setText(item.group);
-      }
+      row.createEl("td", { text: item.group, cls: "lapse-reports-group-name" });
       const projects = new Set(item.entries.map((e) => e.project).filter((p) => p));
       const allTags = /* @__PURE__ */ new Set();
       item.entries.forEach((e) => {
         var _a;
         return (_a = e.entry.tags) == null ? void 0 : _a.forEach((t) => allTags.add(t));
       });
-      if (showProjectColumn) {
-        row.createEl("td", { text: projects.size > 0 ? Array.from(projects).join(", ") : "-" });
-      }
+      row.createEl("td", { text: projects.size > 0 ? Array.from(projects).join(", ") : "-" });
       row.createEl("td", { text: allTags.size > 0 ? Array.from(allTags).map((t) => `#${t}`).join(", ") : "-" });
       row.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(item.totalTime) });
       row.createEl("td", { text: item.entryCount.toString() });
-      const detailRows = [];
-      if (item.subGroups && item.subGroups.size > 0) {
-        for (const [subGroupName, subGroup] of item.subGroups) {
-          const subRow = tbody.createEl("tr", { cls: "lapse-reports-subgroup-row" });
-          subRow.style.display = isExpanded ? "" : "none";
-          subRow.createEl("td");
-          subRow.createEl("td", { text: `  ${subGroupName}`, cls: "lapse-reports-subgroup-name" });
-          const subProjects = new Set(subGroup.entries.map((e) => e.project).filter((p) => p));
-          const subTags = /* @__PURE__ */ new Set();
-          subGroup.entries.forEach((e) => {
-            var _a;
-            return (_a = e.entry.tags) == null ? void 0 : _a.forEach((t) => subTags.add(t));
-          });
-          if (showProjectColumn) {
-            subRow.createEl("td", { text: subProjects.size > 0 ? Array.from(subProjects).join(", ") : "-" });
-          }
-          subRow.createEl("td", { text: subTags.size > 0 ? Array.from(subTags).map((t) => `#${t}`).join(", ") : "-" });
-          subRow.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(subGroup.totalTime) });
-          subRow.createEl("td", { text: subGroup.entryCount.toString() });
-          detailRows.push(subRow);
-        }
-      } else {
-        for (const { entry, noteName, project, filePath } of item.entries) {
-          const entryRow = tbody.createEl("tr", { cls: "lapse-reports-entry-row" });
-          entryRow.style.display = isExpanded ? "" : "none";
-          entryRow.createEl("td");
-          entryRow.createEl("td", { text: `  ${entry.label}`, cls: "lapse-reports-entry-label" });
-          if (showProjectColumn) {
-            entryRow.createEl("td", { text: project || "-" });
-          }
-          entryRow.createEl("td", { text: entry.tags && entry.tags.length > 0 ? entry.tags.map((t) => `#${t}`).join(", ") : "-" });
-          const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
-          entryRow.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(entryDuration) });
-          const noteCell = entryRow.createEl("td", { cls: "lapse-reports-note-name" });
-          const noteLink = noteCell.createEl("a", {
-            text: noteName,
-            cls: "lapse-reports-link"
-          });
-          noteLink.onclick = async (e) => {
-            e.stopPropagation();
-            await this.plugin.app.workspace.openLinkText(filePath, "", true);
-          };
-          detailRows.push(entryRow);
-        }
-      }
       row.style.cursor = "pointer";
       row.onclick = () => {
-        const wasExpanded = this.expandedGroups.has(groupId);
-        if (wasExpanded) {
+        if (this.expandedGroups.has(groupId)) {
           this.expandedGroups.delete(groupId);
-          (0, import_obsidian.setIcon)(expandBtn, "chevron-right");
-          detailRows.forEach((r) => r.style.display = "none");
         } else {
           this.expandedGroups.add(groupId);
-          (0, import_obsidian.setIcon)(expandBtn, "chevron-down");
-          detailRows.forEach((r) => r.style.display = "");
         }
+        this.render();
       };
+      if (isExpanded) {
+        if (item.subGroups && item.subGroups.size > 0) {
+          for (const [subGroupName, subGroup] of item.subGroups) {
+            const subRow = tbody.createEl("tr", { cls: "lapse-reports-subgroup-row" });
+            subRow.createEl("td");
+            subRow.createEl("td", { text: `  ${subGroupName}`, cls: "lapse-reports-subgroup-name" });
+            const subProjects = new Set(subGroup.entries.map((e) => e.project).filter((p) => p));
+            const subTags = /* @__PURE__ */ new Set();
+            subGroup.entries.forEach((e) => {
+              var _a;
+              return (_a = e.entry.tags) == null ? void 0 : _a.forEach((t) => subTags.add(t));
+            });
+            subRow.createEl("td", { text: subProjects.size > 0 ? Array.from(subProjects).join(", ") : "-" });
+            subRow.createEl("td", { text: subTags.size > 0 ? Array.from(subTags).map((t) => `#${t}`).join(", ") : "-" });
+            subRow.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(subGroup.totalTime) });
+            subRow.createEl("td", { text: subGroup.entryCount.toString() });
+          }
+        } else {
+          for (const { entry, noteName, project } of item.entries) {
+            const entryRow = tbody.createEl("tr", { cls: "lapse-reports-entry-row" });
+            entryRow.createEl("td");
+            entryRow.createEl("td", { text: `  ${entry.label}`, cls: "lapse-reports-entry-label" });
+            entryRow.createEl("td", { text: project || "-" });
+            entryRow.createEl("td", { text: entry.tags && entry.tags.length > 0 ? entry.tags.map((t) => `#${t}`).join(", ") : "-" });
+            const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
+            entryRow.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(entryDuration) });
+            entryRow.createEl("td", { text: noteName, cls: "lapse-reports-note-name" });
+          }
+        }
+      }
     }
     if (data.length > 0) {
       const chartContainer = container.createDiv({ cls: "lapse-reports-chart-container" });
-      await this.renderChart(chartContainer, sortedData, totalTime);
+      await this.renderChart(chartContainer, data, totalTime);
     }
   }
   getGroupByLabel() {
@@ -2801,16 +2897,6 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     }
   }
   async getReportData() {
-    let entries;
-    if (this.cachedRawEntries) {
-      entries = this.cachedRawEntries;
-    } else {
-      entries = await this.fetchRawEntries();
-      this.cachedRawEntries = entries;
-    }
-    return this.groupEntries(entries);
-  }
-  async fetchRawEntries() {
     const now = new Date();
     let startDate;
     let endDate = new Date(now);
@@ -2876,9 +2962,6 @@ var LapseReportsView = class extends import_obsidian.ItemView {
         }
       }
     }
-    return entries;
-  }
-  groupEntries(entries) {
     const grouped = /* @__PURE__ */ new Map();
     for (const { filePath, entry, project, noteName } of entries) {
       const primaryKey = this.getGroupKey(entry, filePath, project, this.groupBy);
@@ -2920,34 +3003,7 @@ var LapseReportsView = class extends import_obsidian.ItemView {
   }
   async renderChart(container, data, totalTime) {
     container.empty();
-    const chartHeader = container.createDiv({ cls: "lapse-chart-header" });
-    chartHeader.createEl("h4", { text: "Time Distribution" });
-    const chartTypeButtons = chartHeader.createDiv({ cls: "lapse-chart-type-buttons" });
-    const barBtn = chartTypeButtons.createEl("button", {
-      cls: `lapse-chart-type-btn ${this.chartType === "bar" ? "active" : ""}`,
-      attr: { "aria-label": "Bar chart" }
-    });
-    (0, import_obsidian.setIcon)(barBtn, "bar-chart");
-    barBtn.onclick = () => {
-      this.chartType = "bar";
-      this.renderChart(container, data, totalTime);
-    };
-    const pieBtn = chartTypeButtons.createEl("button", {
-      cls: `lapse-chart-type-btn ${this.chartType === "pie" ? "active" : ""}`,
-      attr: { "aria-label": "Pie chart" }
-    });
-    (0, import_obsidian.setIcon)(pieBtn, "pie-chart");
-    pieBtn.onclick = () => {
-      this.chartType = "pie";
-      this.renderChart(container, data, totalTime);
-    };
-    if (this.chartType === "bar") {
-      this.renderBarChart(container, data, totalTime);
-    } else {
-      this.renderPieChart(container, data, totalTime);
-    }
-  }
-  renderBarChart(container, data, totalTime) {
+    container.createEl("h4", { text: "Time Distribution" });
     const viewBoxWidth = 1e3;
     const chartHeight = 250;
     const labelHeight = 80;
@@ -3018,66 +3074,6 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       labelDiv.textContent = item.group;
       foreignObject.appendChild(labelDiv);
       svg.appendChild(foreignObject);
-    });
-  }
-  renderPieChart(container, data, totalTime) {
-    const pieContainer = container.createDiv({ cls: "lapse-pie-chart-wrapper" });
-    const colors = [
-      "#4A90E2",
-      "#50C878",
-      "#FF6B6B",
-      "#FFD93D",
-      "#9B59B6",
-      "#E67E22",
-      "#1ABC9C",
-      "#E74C3C"
-    ];
-    const legend = pieContainer.createDiv({ cls: "lapse-chart-legend" });
-    data.forEach((item, index) => {
-      const legendItem = legend.createDiv({ cls: "lapse-chart-legend-item" });
-      const colorBox = legendItem.createEl("span", { cls: "lapse-chart-legend-color" });
-      colorBox.style.backgroundColor = colors[index % colors.length];
-      const label = legendItem.createEl("span", { cls: "lapse-chart-legend-label" });
-      label.textContent = `${item.group}: ${this.plugin.formatTimeAsHHMMSS(item.totalTime)}`;
-    });
-    const svgContainer = pieContainer.createDiv({ cls: "lapse-pie-chart-svg-container" });
-    const size = 300;
-    const radius = 120;
-    const centerX = size / 2;
-    const centerY = size / 2;
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("class", "lapse-reports-chart");
-    svg.setAttribute("width", "100%");
-    svg.setAttribute("height", "100%");
-    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
-    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-    svgContainer.appendChild(svg);
-    let currentAngle = -90;
-    data.forEach((item, index) => {
-      const percentage = totalTime > 0 ? item.totalTime / totalTime : 0;
-      const sliceAngle = percentage * 360;
-      if (sliceAngle === 0)
-        return;
-      const startAngle = currentAngle * Math.PI / 180;
-      const endAngle = (currentAngle + sliceAngle) * Math.PI / 180;
-      const x1 = centerX + radius * Math.cos(startAngle);
-      const y1 = centerY + radius * Math.sin(startAngle);
-      const x2 = centerX + radius * Math.cos(endAngle);
-      const y2 = centerY + radius * Math.sin(endAngle);
-      const largeArcFlag = sliceAngle > 180 ? 1 : 0;
-      const pathData = [
-        `M ${centerX} ${centerY}`,
-        `L ${x1} ${y1}`,
-        `A ${radius} ${radius} 0 ${largeArcFlag} 1 ${x2} ${y2}`,
-        "Z"
-      ].join(" ");
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", pathData);
-      path.setAttribute("fill", colors[index % colors.length]);
-      path.setAttribute("stroke", "var(--background-primary)");
-      path.setAttribute("stroke-width", "2");
-      svg.appendChild(path);
-      currentAngle += sliceAngle;
     });
   }
 };
