@@ -19,6 +19,7 @@ interface LapseSettings {
 	firstDayOfWeek: number; // 0 = Sunday, 1 = Monday, etc.
 	excludedFolders: string[]; // Glob patterns for folders to exclude
 	showStatusBar: boolean; // Show active timer(s) in status bar
+	lapseButtonTemplatesFolder: string; // Folder containing templates for lapse-button inline buttons
 }
 
 const DEFAULT_SETTINGS: LapseSettings = {
@@ -39,7 +40,8 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	timeAdjustMinutes: 5,
 	firstDayOfWeek: 0, // 0 = Sunday
 	excludedFolders: [], // No folders excluded by default
-	showStatusBar: true // Show active timers in status bar by default
+	showStatusBar: true, // Show active timers in status bar by default
+	lapseButtonTemplatesFolder: 'Templates/Lapse Buttons' // Default folder for lapse button templates
 }
 
 interface TimeEntry {
@@ -83,10 +85,8 @@ interface EntryCache {
 export default class LapsePlugin extends Plugin {
 	settings: LapseSettings;
 	timeData: Map<string, PageTimeData> = new Map();
-	entryCache: EntryCache = {}; // Persistent cache indexed by file path
+	entryCache: EntryCache = {}; // In-memory cache indexed by file path (lazy-loaded)
 	cacheSaveTimeout: number | null = null; // Debounce cache saves
-	cacheLoading: boolean = false; // Track if cache is still loading
-	cacheLoaded: Promise<void> | null = null; // Promise to wait for cache loading
 	statusBarItem: HTMLElement | null = null; // Status bar element
 	statusBarUpdateInterval: number | null = null; // Interval for updating status bar
 	pendingSaves: Promise<void>[] = []; // Track pending save operations
@@ -97,9 +97,45 @@ export default class LapsePlugin extends Plugin {
 
 		console.log(`Lapse: Plugin loading... (${Date.now() - pluginStartTime}ms)`);
 
+		// Listen to metadata cache changes to automatically invalidate stale cache entries
+		this.registerEvent(
+			this.app.metadataCache.on('changed', (file) => {
+				// Invalidate cache for this file when its metadata changes
+				this.invalidateCacheForFile(file.path);
+			})
+		);
+
+		// Also invalidate on file deletion/rename
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				this.invalidateCacheForFile(file.path);
+				// Also remove from in-memory timeData
+				this.timeData.delete(file.path);
+			})
+		);
+
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				this.invalidateCacheForFile(oldPath);
+				this.timeData.delete(oldPath);
+			})
+		);
+
 		// Register the code block processors
 		this.registerMarkdownCodeBlockProcessor('lapse', this.processTimerCodeBlock.bind(this));
 		this.registerMarkdownCodeBlockProcessor('lapse-report', this.processReportCodeBlock.bind(this));
+
+		// Register inline code processor for lapse template buttons
+		this.registerMarkdownPostProcessor((el, ctx) => {
+			const codeElements = el.querySelectorAll('code');
+			codeElements.forEach((codeEl) => {
+				const text = codeEl.textContent || '';
+				if (text.startsWith('lapse:')) {
+					const templateName = text.substring('lapse:'.length);
+					this.processLapseButton(codeEl, templateName, ctx);
+				}
+			});
+		});
 
 		// Register the sidebar view
 		this.registerView(
@@ -113,6 +149,12 @@ export default class LapsePlugin extends Plugin {
 			(leaf) => new LapseReportsView(leaf, this)
 		);
 
+		// Register the buttons view
+		this.registerView(
+			'lapse-buttons',
+			(leaf) => new LapseButtonsView(leaf, this)
+		);
+
 		// Add ribbon icons
 		this.addRibbonIcon('clock', 'Lapse: Show Activity', () => {
 			this.activateView();
@@ -120,6 +162,10 @@ export default class LapsePlugin extends Plugin {
 
 		this.addRibbonIcon('bar-chart-2', 'Lapse: Show Time Reports', () => {
 			this.activateReportsView();
+		});
+
+		this.addRibbonIcon('play-circle', 'Lapse: Show Quick Start', () => {
+			this.activateButtonsView();
 		});
 
 		// Add command to insert timer
@@ -311,6 +357,26 @@ export default class LapsePlugin extends Plugin {
 			name: 'Show time reports',
 			callback: () => {
 				this.activateReportsView();
+			}
+		});
+
+		// Add command to show buttons view
+		this.addCommand({
+			id: 'show-lapse-buttons',
+			name: 'Show quick start',
+			callback: () => {
+				this.activateButtonsView();
+			}
+		});
+
+		// Add command to insert lapse button
+		this.addCommand({
+			id: 'insert-lapse-button',
+			name: 'Insert template button',
+			editorCallback: (editor) => {
+				new LapseButtonModal(this.app, this, (templateName) => {
+					editor.replaceSelection(`\`lapse:${templateName}\``);
+				}).open();
 			}
 		});
 
@@ -771,6 +837,213 @@ export default class LapsePlugin extends Plugin {
 			}
 		} catch (error) {
 			console.error('Error reading frontmatter for project:', error);
+		}
+		
+		return null;
+	}
+
+	async processLapseButton(codeEl: HTMLElement, templateName: string, ctx: MarkdownPostProcessorContext) {
+		// Find the template file
+		const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
+		const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+		
+		if (!templateFile || !(templateFile instanceof TFile)) {
+			// Template not found - show error
+			const errorBtn = document.createElement('button');
+			errorBtn.className = 'lapse-button lapse-button-error';
+			errorBtn.textContent = `⚠️ Template not found: ${templateName}`;
+			errorBtn.title = `Looking for: ${templatePath}`;
+			errorBtn.disabled = true;
+			codeEl.replaceWith(errorBtn);
+			return;
+		}
+
+		// Read template to get project info
+		let project: string | null = null;
+		try {
+			const content = await this.app.vault.read(templateFile);
+			// Match frontmatter anywhere in the file (not just at start) to handle Templater code
+			const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+			const match = content.match(frontmatterRegex);
+			
+			if (match) {
+				const frontmatter = match[1];
+				const lines = frontmatter.split('\n');
+				
+				for (const line of lines) {
+					if (line.trim().startsWith(this.settings.projectKey + ':')) {
+						project = line.split(':').slice(1).join(':').trim(); // Handle colons in project name
+						// Remove quotes and wikilink syntax - use simple string replaceAll
+						if (project) {
+							// Remove wikilinks
+							project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
+						// Remove quotes
+						project = project.replace(/^["']+|["']+$/g, '');
+						project = project.trim();
+					}
+					break;
+					}
+				}
+			}
+		} catch (error) {
+			console.error('Error reading template:', error);
+		}
+
+		// Get project color if available
+		let projectColor: string | null = null;
+		if (project) {
+			projectColor = await this.getProjectColor(project);
+		}
+
+		// Create button
+		const button = document.createElement('button');
+		button.className = 'lapse-button';
+		
+		// Build button structure with two lines
+		const topLine = document.createElement('div');
+		topLine.className = 'lapse-button-name';
+		topLine.textContent = templateName;
+		button.appendChild(topLine);
+		
+		if (project) {
+			const bottomLine = document.createElement('div');
+			bottomLine.className = 'lapse-button-project';
+			bottomLine.textContent = project;
+			button.appendChild(bottomLine);
+		}
+		
+		// Apply project color to left border and project name pill
+		if (projectColor) {
+			// Color the left border
+			button.style.borderLeftColor = projectColor;
+			
+			// Style the project name pill with solid color background and contrasting text
+			if (project) {
+				const bottomLine = button.querySelector('.lapse-button-project') as HTMLElement;
+				if (bottomLine) {
+					// Set the pill background to the project color
+					bottomLine.style.backgroundColor = projectColor;
+					
+					// Use contrasting text color (white or black depending on brightness)
+					const contrastColor = this.getContrastColor(projectColor);
+					bottomLine.style.color = contrastColor;
+				}
+			}
+		}
+		
+		// Handle click - create new note from template
+		button.onclick = async () => {
+			try {
+				// Use Obsidian's templater or just copy the template
+				const templateContent = await this.app.vault.read(templateFile);
+				
+				// Generate a new note name with timestamp
+				const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+				const newNoteName = `${templateName} ${timestamp}`;
+				
+				// Determine where to create the note (same folder as template or root)
+				const newNotePath = `${newNoteName}.md`;
+				
+				// Create the new note
+				const newFile = await this.app.vault.create(newNotePath, templateContent);
+				
+				// Open the new note
+				await this.app.workspace.getLeaf(false).openFile(newFile);
+			} catch (error) {
+				console.error('Error creating note from template:', error);
+			}
+		};
+		
+		// Replace the code element with the button
+		codeEl.replaceWith(button);
+	}
+
+	// Helper to get contrasting text color for a background color
+	getContrastColor(hexColor: string): string {
+		// Remove # if present
+		const hex = hexColor.replace('#', '');
+		
+		// Convert to RGB
+		const r = parseInt(hex.substr(0, 2), 16);
+		const g = parseInt(hex.substr(2, 2), 16);
+		const b = parseInt(hex.substr(4, 2), 16);
+		
+		// Calculate luminance
+		const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+		
+		// Return black or white based on luminance
+		return luminance > 0.5 ? '#000000' : '#ffffff';
+	}
+
+	// Helper to convert hex color to RGBA with opacity
+	hexToRGBA(hexColor: string, opacity: number): string | null {
+		// Remove # if present
+		const hex = hexColor.replace('#', '');
+		
+		// Handle both 3-digit and 6-digit hex codes
+		let r: number, g: number, b: number;
+		
+		if (hex.length === 3) {
+			r = parseInt(hex[0] + hex[0], 16);
+			g = parseInt(hex[1] + hex[1], 16);
+			b = parseInt(hex[2] + hex[2], 16);
+		} else if (hex.length === 6) {
+			r = parseInt(hex.substr(0, 2), 16);
+			g = parseInt(hex.substr(2, 2), 16);
+			b = parseInt(hex.substr(4, 2), 16);
+		} else {
+			return null;
+		}
+		
+		return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+	}
+
+	async getProjectColor(projectName: string): Promise<string | null> {
+		if (!projectName) {
+			return null;
+		}
+
+		// Try to find the project note by wikilink resolution
+		const file = this.app.metadataCache.getFirstLinkpathDest(projectName, '');
+		
+		if (!file || !(file instanceof TFile)) {
+			return null;
+		}
+
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+			const match = content.match(frontmatterRegex);
+			
+			if (!match) {
+				return null;
+			}
+			
+			const frontmatter = match[1];
+			const lines = frontmatter.split('\n');
+			
+			// Look for color field (trying common variations)
+			const colorKeys = ['color', 'colour', 'lapse-color'];
+			
+			for (const key of colorKeys) {
+				for (let i = 0; i < lines.length; i++) {
+					const line = lines[i].trim();
+					
+					if (line.startsWith(`${key}:`)) {
+						let value = line.replace(new RegExp(`^${key}:\\s*`), '').trim();
+						
+						// Remove quotes if present
+						value = value.replace(/^["']+|["']+$/g, '');
+						
+						// Validate it looks like a color (hex or named color)
+						if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/)) {
+							return value;
+						}
+					}
+				}
+			}
+		} catch (error) {
+			console.error('Error reading project color:', error);
 		}
 		
 		return null;
@@ -2224,6 +2497,24 @@ export default class LapsePlugin extends Plugin {
 		}
 	}
 
+	async activateButtonsView() {
+		const { workspace } = this.app;
+
+		let leaf: WorkspaceLeaf | null = null;
+		const leaves = workspace.getLeavesOfType('lapse-buttons');
+
+		if (leaves.length > 0) {
+			leaf = leaves[0];
+		} else {
+			leaf = workspace.getRightLeaf(false);
+			await leaf?.setViewState({ type: 'lapse-buttons', active: true });
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
+	}
+
 	async getActiveTimers(): Promise<Array<{ filePath: string; entry: TimeEntry }>> {
 		const activeTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
 
@@ -2297,76 +2588,17 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const startTime = Date.now();
 		const data = await this.loadData();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		
-		// Load entry cache if it exists
-		if (data && data.entryCache) {
-			const cacheSize = Object.keys(data.entryCache).length;
-			
-			// For very large caches (>5000 files), warn and consider pruning
-			if (cacheSize > 5000) {
-				console.warn(`Lapse: Large cache detected (${cacheSize} files). Consider clearing cache if experiencing slowdowns.`);
-				
-				// Prune cache to only keep entries from last 90 days
-				const ninetyDaysAgo = Date.now() - (90 * 24 * 60 * 60 * 1000);
-				const prunedCache: EntryCache = {};
-				let prunedCount = 0;
-				
-				for (const [filePath, cached] of Object.entries(data.entryCache as EntryCache)) {
-					// Keep if any entries are recent
-					const hasRecentEntries = cached.entries.some((e: TimeEntry) => 
-						(e.startTime && e.startTime > ninetyDaysAgo) || 
-						(e.endTime && e.endTime > ninetyDaysAgo)
-					);
-					
-					if (hasRecentEntries || cached.lastModified > ninetyDaysAgo) {
-						prunedCache[filePath] = cached;
-					} else {
-						prunedCount++;
-					}
-				}
-				
-				console.log(`Lapse: Pruned ${prunedCount} old cache entries, keeping ${Object.keys(prunedCache).length} recent files`);
-				data.entryCache = prunedCache;
-			}
-			
-			const finalCacheSize = Object.keys(data.entryCache).length;
-			console.log(`Lapse: Loading cache with ${finalCacheSize} files...`);
-			
-			// For large caches, load in background to avoid blocking plugin init
-			if (finalCacheSize > 100) {
-				this.cacheLoading = true;
-				// Load cache asynchronously without blocking
-				this.cacheLoaded = new Promise<void>((resolve) => {
-					setTimeout(async () => {
-						this.entryCache = data.entryCache;
-						this.cacheLoading = false;
-						const loadTime = Date.now() - startTime;
-						console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
-						
-						// Save pruned cache if we pruned anything
-						if (finalCacheSize < cacheSize) {
-							await this.saveCache();
-						}
-						
-						resolve();
-					}, 0);
-				});
-			} else {
-				this.entryCache = data.entryCache;
-				const loadTime = Date.now() - startTime;
-				console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
-			}
-		}
+		// Don't load the large cache on startup - use on-demand loading instead
+		// This allows plugin to load instantly
+		console.log('Lapse: Settings loaded (cache will load on-demand)');
 	}
 
 	async saveSettings() {
-		await this.saveData({
-			...this.settings,
-			entryCache: this.entryCache
-		});
+		// Only save settings, not the cache
+		await this.saveData(this.settings);
 	}
 
 	async saveCache() {
@@ -2379,9 +2611,10 @@ export default class LapsePlugin extends Plugin {
 		const savePromise = new Promise<void>((resolve) => {
 			this.cacheSaveTimeout = window.setTimeout(async () => {
 				try {
-					// Save just the cache without triggering full settings save
+					// Save cache separately from settings
+					const data = await this.loadData();
 					await this.saveData({
-						...this.settings,
+						...data,
 						entryCache: this.entryCache
 					});
 				} finally {
@@ -2407,22 +2640,19 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async getCachedOrLoadEntries(filePath: string): Promise<{ entries: TimeEntry[]; project: string | null; totalTime: number }> {
-		// Wait for cache to finish loading if it's still in progress
-		if (this.cacheLoading && this.cacheLoaded) {
-			await this.cacheLoaded;
-		}
-		
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (!file || !(file instanceof TFile)) {
 			return { entries: [], project: null, totalTime: 0 };
 		}
 
+		// Use Obsidian's metadata cache to get file modification time instantly
+		const fileCache = this.app.metadataCache.getFileCache(file);
 		const currentMtime = file.stat.mtime;
 		const cached = this.entryCache[filePath];
 
-		// Check if cache is valid (file hasn't been modified)
+		// Check if cache is valid using mtime (instant check, no disk I/O)
 		if (cached && cached.lastModified === currentMtime) {
-			// Cache hit - return cached data
+			// Cache hit - return cached data instantly
 			return {
 				entries: cached.entries,
 				project: cached.project,
@@ -2430,7 +2660,7 @@ export default class LapsePlugin extends Plugin {
 			};
 		}
 
-		// Cache miss or stale - load from frontmatter
+		// Cache miss or stale - load from frontmatter (only when needed)
 		await this.loadEntriesFromFrontmatter(filePath);
 		const pageData = this.timeData.get(filePath);
 		const project = await this.getProjectFromFrontmatter(filePath);
@@ -2438,7 +2668,7 @@ export default class LapsePlugin extends Plugin {
 		const entries = pageData ? pageData.entries : [];
 		const totalTime = pageData ? pageData.totalTimeTracked : 0;
 
-		// Update cache
+		// Update in-memory cache
 		this.entryCache[filePath] = {
 			lastModified: currentMtime,
 			entries: entries,
@@ -2446,8 +2676,8 @@ export default class LapsePlugin extends Plugin {
 			totalTime: totalTime
 		};
 
-		// Save cache to disk (debounced in real usage, but immediate for now)
-		await this.saveCache();
+		// Debounced save to disk (non-blocking)
+		this.saveCache();
 
 		return { entries, project, totalTime };
 	}
@@ -2971,6 +3201,252 @@ class LapseSidebarView extends ItemView {
 	}
 }
 
+class LapseButtonsView extends ItemView {
+	plugin: LapsePlugin;
+
+	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
+		super(leaf);
+		this.plugin = plugin;
+	}
+
+	getViewType(): string {
+		return 'lapse-buttons';
+	}
+
+	getDisplayText(): string {
+		return 'Quick Start';
+	}
+
+	getIcon(): string {
+		return 'play-circle';
+	}
+
+	async onOpen() {
+		await this.render();
+	}
+
+	async onClose() {
+		// Cleanup if needed
+	}
+
+	async render() {
+		const container = this.containerEl.children[1];
+		container.empty();
+		container.addClass('lapse-buttons-view');
+
+		// Header
+		const header = container.createDiv({ cls: 'lapse-buttons-header' });
+		header.createEl('h2', { text: 'Quick Start' });
+
+		// Get all template files from the configured folder
+		const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
+		const files = this.app.vault.getMarkdownFiles();
+		const templates = files.filter(file => file.path.startsWith(templateFolder + '/'));
+
+		if (templates.length === 0) {
+			container.createEl('p', { 
+				text: `No templates found in ${templateFolder}. Configure your template folder in Lapse settings.`,
+				cls: 'lapse-buttons-empty'
+			});
+			return;
+		}
+
+		// Read all templates and group by project
+		interface TemplateData {
+			template: TFile;
+			templateName: string;
+			project: string | null;
+			projectColor: string | null;
+		}
+
+		const templateDataList: TemplateData[] = [];
+
+		for (const template of templates) {
+			const templateName = template.basename;
+			let project: string | null = null;
+			let projectColor: string | null = null;
+			
+			try {
+				const content = await this.app.vault.read(template);
+				const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+				const match = content.match(frontmatterRegex);
+				
+				if (match) {
+					const frontmatter = match[1];
+					const lines = frontmatter.split('\n');
+					
+					for (const line of lines) {
+						if (line.trim().startsWith(this.plugin.settings.projectKey + ':')) {
+							project = line.split(':').slice(1).join(':').trim();
+							if (project) {
+								project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
+								project = project.replace(/^["']+|["']+$/g, '');
+								project = project.trim();
+							}
+							break;
+						}
+					}
+				}
+				
+				// Get project color
+				if (project) {
+					projectColor = await this.plugin.getProjectColor(project);
+				}
+			} catch (error) {
+				console.error('Error reading template:', error);
+			}
+
+			templateDataList.push({
+				template,
+				templateName,
+				project,
+				projectColor
+			});
+		}
+
+		// Group templates by project
+		const grouped = new Map<string, TemplateData[]>();
+		for (const data of templateDataList) {
+			const projectKey = data.project || 'No Project';
+			if (!grouped.has(projectKey)) {
+				grouped.set(projectKey, []);
+			}
+			grouped.get(projectKey)!.push(data);
+		}
+
+		// Sort projects: named projects first (alphabetically), then "No Project"
+		const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
+			if (a === 'No Project') return 1;
+			if (b === 'No Project') return -1;
+			return a.localeCompare(b);
+		});
+
+		// Render each project group
+		for (const projectKey of sortedProjects) {
+			const projectTemplates = grouped.get(projectKey)!;
+			
+			// Project header
+			const projectSection = container.createDiv({ cls: 'lapse-buttons-project-section' });
+			const projectHeader = projectSection.createDiv({ cls: 'lapse-buttons-project-header' });
+			
+			if (projectKey !== 'No Project') {
+				// Get project color for the first template (they should all have same project)
+				const projectColor = projectTemplates[0].projectColor;
+				
+				projectHeader.createEl('h3', { 
+					text: projectKey,
+					cls: 'lapse-buttons-project-title'
+				});
+				
+				if (projectColor) {
+					projectHeader.style.borderLeftColor = projectColor;
+					projectHeader.querySelector('h3')!.style.color = projectColor;
+				}
+			} else {
+				projectHeader.createEl('h3', { 
+					text: projectKey,
+					cls: 'lapse-buttons-project-title'
+				});
+			}
+
+			// Grid of buttons for this project
+			const buttonsGrid = projectSection.createDiv({ cls: 'lapse-buttons-grid' });
+
+			// Create buttons for each template in this project
+			for (const data of projectTemplates) {
+				const button = buttonsGrid.createEl('button', { cls: 'lapse-button' });
+				
+				// Title
+				const titleEl = button.createDiv({ cls: 'lapse-button-name' });
+				titleEl.textContent = data.templateName;
+				
+				// Project pill if exists
+				if (data.project) {
+					const projectEl = button.createDiv({ cls: 'lapse-button-project' });
+					projectEl.textContent = data.project;
+					
+					// Apply colors
+					if (data.projectColor) {
+						button.style.borderLeftColor = data.projectColor;
+						projectEl.style.backgroundColor = data.projectColor;
+						const contrastColor = this.plugin.getContrastColor(data.projectColor);
+						projectEl.style.color = contrastColor;
+					}
+				}
+
+				// Click handler - create new note from template
+				button.onclick = async () => {
+					try {
+						const templateContent = await this.app.vault.read(data.template);
+						const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+						const newNoteName = `${data.templateName} ${timestamp}`;
+						const newNotePath = `${newNoteName}.md`;
+						
+						const newFile = await this.app.vault.create(newNotePath, templateContent);
+						await this.app.workspace.getLeaf(false).openFile(newFile);
+					} catch (error) {
+						console.error('Error creating note from template:', error);
+					}
+				};
+			}
+		}
+	}
+}
+
+class LapseButtonModal extends Modal {
+	plugin: LapsePlugin;
+	onChoose: (templateName: string) => void;
+
+	constructor(app: App, plugin: LapsePlugin, onChoose: (templateName: string) => void) {
+		super(app);
+		this.plugin = plugin;
+		this.onChoose = onChoose;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		
+		contentEl.createEl('h2', { text: 'Select template' });
+
+		// Get all template files from the configured folder
+		const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
+		const files = this.app.vault.getMarkdownFiles();
+		const templates = files.filter(file => file.path.startsWith(templateFolder + '/'));
+
+		if (templates.length === 0) {
+			contentEl.createEl('p', { 
+				text: `No templates found in ${templateFolder}`,
+				cls: 'mod-warning'
+			});
+			return;
+		}
+
+		// Create a list of template buttons
+		const templateList = contentEl.createDiv({ cls: 'lapse-template-list' });
+		
+		templates.forEach(template => {
+			// Extract template name (remove folder path and .md extension)
+			const templateName = template.basename;
+			
+			const button = templateList.createEl('button', {
+				text: templateName,
+				cls: 'lapse-template-option'
+			});
+			
+			button.onclick = () => {
+				this.onChoose(templateName);
+				this.close();
+			};
+		});
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
 class LapseSettingTab extends PluginSettingTab {
 	plugin: LapsePlugin;
 
@@ -3170,6 +3646,24 @@ class LapseSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
+		containerEl.createEl('h3', { text: 'Lapse Button Templates' });
+
+		new Setting(containerEl)
+			.setName('Templates folder')
+			.setDesc('Folder path containing templates for lapse-button inline buttons (e.g., Templates/Lapse Buttons). Templates should be in your vault\'s template folder.')
+			.addText(text => text
+				.setPlaceholder('Templates/Lapse Buttons')
+				.setValue(this.plugin.settings.lapseButtonTemplatesFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.lapseButtonTemplatesFolder = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createDiv({ cls: 'setting-item-description' })
+			.createEl('p', { 
+				text: 'Create buttons in notes using inline code: `lapse:TemplateName`. The button will create a new note from the template and open it.' 
+			});
+
 		containerEl.createEl('h3', { text: 'Timer Controls' });
 
 		new Setting(containerEl)
@@ -3223,6 +3717,104 @@ class LapseSettingTab extends PluginSettingTab {
 				ul.createEl('li', { text: '**/2020/** - 2020 folder at any depth' });
 				ul.createEl('li', { text: '**/Archive - Any folder ending in Archive' });
 			});
+
+		containerEl.createEl('h3', { text: 'Cache Management' });
+
+		// Cache info display
+		const cacheSize = Object.keys(this.plugin.entryCache).length;
+		const cacheInfoSetting = new Setting(containerEl)
+			.setName('Entry cache')
+			.setDesc(`Currently caching ${cacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
+
+		// Clear cache button
+		new Setting(containerEl)
+			.setName('Clear cache')
+			.setDesc('Delete all cached time entries. The cache will automatically rebuild as you use the plugin. Use this if you\'re experiencing issues or want to free up space.')
+			.addButton(button => button
+				.setButtonText('Clear Cache')
+				.setWarning()
+				.onClick(async () => {
+					// Confirm with user
+					const confirmed = confirm(
+						`Clear cache for ${cacheSize} files?\n\n` +
+						'This will delete all cached time entries. Your timer data in notes is safe. ' +
+						'The cache will rebuild automatically as you use the plugin.'
+					);
+					
+					if (confirmed) {
+						// Clear the cache
+						this.plugin.entryCache = {};
+						await this.plugin.saveSettings();
+						
+						// Update the cache info display
+						cacheInfoSetting.setDesc('Currently caching 0 files. The cache speeds up reports and activity views by storing time entry data.');
+						
+						// Show success message
+						button.setButtonText('Cache Cleared!');
+						setTimeout(() => {
+							button.setButtonText('Clear Cache');
+						}, 2000);
+					}
+				}));
+
+		// Rebuild cache button
+		new Setting(containerEl)
+			.setName('Rebuild cache')
+			.setDesc('Force a complete rebuild of the cache by scanning all markdown files in your vault. This may take a while for large vaults.')
+			.addButton(button => button
+				.setButtonText('Rebuild Cache')
+				.onClick(async () => {
+					button.setButtonText('Rebuilding...');
+					button.setDisabled(true);
+					
+					try {
+						// Clear existing cache
+						this.plugin.entryCache = {};
+						
+						// Scan all markdown files
+						const files = this.app.vault.getMarkdownFiles();
+						let processedCount = 0;
+						
+						for (const file of files) {
+							const filePath = file.path;
+							
+							// Skip excluded folders
+							if (this.plugin.isFileExcluded(filePath)) {
+								continue;
+							}
+							
+							// Load and cache entries
+							await this.plugin.getCachedOrLoadEntries(filePath);
+							processedCount++;
+							
+							// Update button text periodically
+							if (processedCount % 100 === 0) {
+								button.setButtonText(`Rebuilding... ${processedCount}/${files.length}`);
+							}
+						}
+						
+						// Save the rebuilt cache
+						await this.plugin.saveSettings();
+						
+						// Update cache info
+						const newCacheSize = Object.keys(this.plugin.entryCache).length;
+						cacheInfoSetting.setDesc(`Currently caching ${newCacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
+						
+						// Show success
+						button.setButtonText('Rebuild Complete!');
+						setTimeout(() => {
+							button.setButtonText('Rebuild Cache');
+							button.setDisabled(false);
+						}, 3000);
+					} catch (error) {
+						console.error('Lapse: Error rebuilding cache', error);
+						button.setButtonText('Rebuild Failed');
+						setTimeout(() => {
+							button.setButtonText('Rebuild Cache');
+							button.setDisabled(false);
+						}, 3000);
+					}
+				}));
 	}
 }
 

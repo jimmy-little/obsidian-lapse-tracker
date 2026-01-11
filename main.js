@@ -48,21 +48,19 @@ var DEFAULT_SETTINGS = {
   // 0 = Sunday
   excludedFolders: [],
   // No folders excluded by default
-  showStatusBar: true
+  showStatusBar: true,
   // Show active timers in status bar by default
+  lapseButtonTemplatesFolder: "Templates/Lapse Buttons"
+  // Default folder for lapse button templates
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.timeData = /* @__PURE__ */ new Map();
     this.entryCache = {};
-    // Persistent cache indexed by file path
+    // In-memory cache indexed by file path (lazy-loaded)
     this.cacheSaveTimeout = null;
     // Debounce cache saves
-    this.cacheLoading = false;
-    // Track if cache is still loading
-    this.cacheLoaded = null;
-    // Promise to wait for cache loading
     this.statusBarItem = null;
     // Status bar element
     this.statusBarUpdateInterval = null;
@@ -74,8 +72,35 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     const pluginStartTime = Date.now();
     await this.loadSettings();
     console.log(`Lapse: Plugin loading... (${Date.now() - pluginStartTime}ms)`);
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file) => {
+        this.invalidateCacheForFile(file.path);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.invalidateCacheForFile(file.path);
+        this.timeData.delete(file.path);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        this.invalidateCacheForFile(oldPath);
+        this.timeData.delete(oldPath);
+      })
+    );
     this.registerMarkdownCodeBlockProcessor("lapse", this.processTimerCodeBlock.bind(this));
     this.registerMarkdownCodeBlockProcessor("lapse-report", this.processReportCodeBlock.bind(this));
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const codeElements = el.querySelectorAll("code");
+      codeElements.forEach((codeEl) => {
+        const text = codeEl.textContent || "";
+        if (text.startsWith("lapse:")) {
+          const templateName = text.substring("lapse:".length);
+          this.processLapseButton(codeEl, templateName, ctx);
+        }
+      });
+    });
     this.registerView(
       "lapse-sidebar",
       (leaf) => new LapseSidebarView(leaf, this)
@@ -84,11 +109,18 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       "lapse-reports",
       (leaf) => new LapseReportsView(leaf, this)
     );
+    this.registerView(
+      "lapse-buttons",
+      (leaf) => new LapseButtonsView(leaf, this)
+    );
     this.addRibbonIcon("clock", "Lapse: Show Activity", () => {
       this.activateView();
     });
     this.addRibbonIcon("bar-chart-2", "Lapse: Show Time Reports", () => {
       this.activateReportsView();
+    });
+    this.addRibbonIcon("play-circle", "Lapse: Show Quick Start", () => {
+      this.activateButtonsView();
     });
     this.addCommand({
       id: "insert-lapse-timer",
@@ -228,6 +260,22 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       name: "Show time reports",
       callback: () => {
         this.activateReportsView();
+      }
+    });
+    this.addCommand({
+      id: "show-lapse-buttons",
+      name: "Show quick start",
+      callback: () => {
+        this.activateButtonsView();
+      }
+    });
+    this.addCommand({
+      id: "insert-lapse-button",
+      name: "Insert template button",
+      editorCallback: (editor) => {
+        new LapseButtonModal(this.app, this, (templateName) => {
+          editor.replaceSelection(`\`lapse:${templateName}\``);
+        }).open();
       }
     });
     this.addSettingTab(new LapseSettingTab(this.app, this));
@@ -573,6 +621,143 @@ ${content}`;
       }
     } catch (error) {
       console.error("Error reading frontmatter for project:", error);
+    }
+    return null;
+  }
+  async processLapseButton(codeEl, templateName, ctx) {
+    const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
+    const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+    if (!templateFile || !(templateFile instanceof import_obsidian.TFile)) {
+      const errorBtn = document.createElement("button");
+      errorBtn.className = "lapse-button lapse-button-error";
+      errorBtn.textContent = `\u26A0\uFE0F Template not found: ${templateName}`;
+      errorBtn.title = `Looking for: ${templatePath}`;
+      errorBtn.disabled = true;
+      codeEl.replaceWith(errorBtn);
+      return;
+    }
+    let project = null;
+    try {
+      const content = await this.app.vault.read(templateFile);
+      const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+      const match = content.match(frontmatterRegex);
+      if (match) {
+        const frontmatter = match[1];
+        const lines = frontmatter.split("\n");
+        for (const line of lines) {
+          if (line.trim().startsWith(this.settings.projectKey + ":")) {
+            project = line.split(":").slice(1).join(":").trim();
+            if (project) {
+              project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
+              project = project.replace(/^["']+|["']+$/g, "");
+              project = project.trim();
+            }
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error reading template:", error);
+    }
+    let projectColor = null;
+    if (project) {
+      projectColor = await this.getProjectColor(project);
+    }
+    const button = document.createElement("button");
+    button.className = "lapse-button";
+    const topLine = document.createElement("div");
+    topLine.className = "lapse-button-name";
+    topLine.textContent = templateName;
+    button.appendChild(topLine);
+    if (project) {
+      const bottomLine = document.createElement("div");
+      bottomLine.className = "lapse-button-project";
+      bottomLine.textContent = project;
+      button.appendChild(bottomLine);
+    }
+    if (projectColor) {
+      button.style.borderLeftColor = projectColor;
+      if (project) {
+        const bottomLine = button.querySelector(".lapse-button-project");
+        if (bottomLine) {
+          bottomLine.style.backgroundColor = projectColor;
+          const contrastColor = this.getContrastColor(projectColor);
+          bottomLine.style.color = contrastColor;
+        }
+      }
+    }
+    button.onclick = async () => {
+      try {
+        const templateContent = await this.app.vault.read(templateFile);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
+        const newNoteName = `${templateName} ${timestamp}`;
+        const newNotePath = `${newNoteName}.md`;
+        const newFile = await this.app.vault.create(newNotePath, templateContent);
+        await this.app.workspace.getLeaf(false).openFile(newFile);
+      } catch (error) {
+        console.error("Error creating note from template:", error);
+      }
+    };
+    codeEl.replaceWith(button);
+  }
+  // Helper to get contrasting text color for a background color
+  getContrastColor(hexColor) {
+    const hex = hexColor.replace("#", "");
+    const r = parseInt(hex.substr(0, 2), 16);
+    const g = parseInt(hex.substr(2, 2), 16);
+    const b = parseInt(hex.substr(4, 2), 16);
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.5 ? "#000000" : "#ffffff";
+  }
+  // Helper to convert hex color to RGBA with opacity
+  hexToRGBA(hexColor, opacity) {
+    const hex = hexColor.replace("#", "");
+    let r, g, b;
+    if (hex.length === 3) {
+      r = parseInt(hex[0] + hex[0], 16);
+      g = parseInt(hex[1] + hex[1], 16);
+      b = parseInt(hex[2] + hex[2], 16);
+    } else if (hex.length === 6) {
+      r = parseInt(hex.substr(0, 2), 16);
+      g = parseInt(hex.substr(2, 2), 16);
+      b = parseInt(hex.substr(4, 2), 16);
+    } else {
+      return null;
+    }
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+  }
+  async getProjectColor(projectName) {
+    if (!projectName) {
+      return null;
+    }
+    const file = this.app.metadataCache.getFirstLinkpathDest(projectName, "");
+    if (!file || !(file instanceof import_obsidian.TFile)) {
+      return null;
+    }
+    try {
+      const content = await this.app.vault.read(file);
+      const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+      const match = content.match(frontmatterRegex);
+      if (!match) {
+        return null;
+      }
+      const frontmatter = match[1];
+      const lines = frontmatter.split("\n");
+      const colorKeys = ["color", "colour", "lapse-color"];
+      for (const key of colorKeys) {
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith(`${key}:`)) {
+            let value = line.replace(new RegExp(`^${key}:\\s*`), "").trim();
+            value = value.replace(/^["']+|["']+$/g, "");
+            if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/)) {
+              return value;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error reading project color:", error);
     }
     return null;
   }
@@ -1647,6 +1832,20 @@ ${content}`;
       workspace.revealLeaf(leaf);
     }
   }
+  async activateButtonsView() {
+    const { workspace } = this.app;
+    let leaf = null;
+    const leaves = workspace.getLeavesOfType("lapse-buttons");
+    if (leaves.length > 0) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      await (leaf == null ? void 0 : leaf.setViewState({ type: "lapse-buttons", active: true }));
+    }
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
   async getActiveTimers() {
     const activeTimers = [];
     this.timeData.forEach((pageData, filePath) => {
@@ -1697,57 +1896,12 @@ ${content}`;
     console.log("Unloading Lapse plugin");
   }
   async loadSettings() {
-    const startTime = Date.now();
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    if (data && data.entryCache) {
-      const cacheSize = Object.keys(data.entryCache).length;
-      if (cacheSize > 5e3) {
-        console.warn(`Lapse: Large cache detected (${cacheSize} files). Consider clearing cache if experiencing slowdowns.`);
-        const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1e3;
-        const prunedCache = {};
-        let prunedCount = 0;
-        for (const [filePath, cached] of Object.entries(data.entryCache)) {
-          const hasRecentEntries = cached.entries.some(
-            (e) => e.startTime && e.startTime > ninetyDaysAgo || e.endTime && e.endTime > ninetyDaysAgo
-          );
-          if (hasRecentEntries || cached.lastModified > ninetyDaysAgo) {
-            prunedCache[filePath] = cached;
-          } else {
-            prunedCount++;
-          }
-        }
-        console.log(`Lapse: Pruned ${prunedCount} old cache entries, keeping ${Object.keys(prunedCache).length} recent files`);
-        data.entryCache = prunedCache;
-      }
-      const finalCacheSize = Object.keys(data.entryCache).length;
-      console.log(`Lapse: Loading cache with ${finalCacheSize} files...`);
-      if (finalCacheSize > 100) {
-        this.cacheLoading = true;
-        this.cacheLoaded = new Promise((resolve) => {
-          setTimeout(async () => {
-            this.entryCache = data.entryCache;
-            this.cacheLoading = false;
-            const loadTime = Date.now() - startTime;
-            console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
-            if (finalCacheSize < cacheSize) {
-              await this.saveCache();
-            }
-            resolve();
-          }, 0);
-        });
-      } else {
-        this.entryCache = data.entryCache;
-        const loadTime = Date.now() - startTime;
-        console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
-      }
-    }
+    console.log("Lapse: Settings loaded (cache will load on-demand)");
   }
   async saveSettings() {
-    await this.saveData({
-      ...this.settings,
-      entryCache: this.entryCache
-    });
+    await this.saveData(this.settings);
   }
   async saveCache() {
     if (this.cacheSaveTimeout) {
@@ -1756,8 +1910,9 @@ ${content}`;
     const savePromise = new Promise((resolve) => {
       this.cacheSaveTimeout = window.setTimeout(async () => {
         try {
+          const data = await this.loadData();
           await this.saveData({
-            ...this.settings,
+            ...data,
             entryCache: this.entryCache
           });
         } finally {
@@ -1777,13 +1932,11 @@ ${content}`;
     delete this.entryCache[filePath];
   }
   async getCachedOrLoadEntries(filePath) {
-    if (this.cacheLoading && this.cacheLoaded) {
-      await this.cacheLoaded;
-    }
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!file || !(file instanceof import_obsidian.TFile)) {
       return { entries: [], project: null, totalTime: 0 };
     }
+    const fileCache = this.app.metadataCache.getFileCache(file);
     const currentMtime = file.stat.mtime;
     const cached = this.entryCache[filePath];
     if (cached && cached.lastModified === currentMtime) {
@@ -1804,7 +1957,7 @@ ${content}`;
       project,
       totalTime
     };
-    await this.saveCache();
+    this.saveCache();
     return { entries, project, totalTime };
   }
 };
@@ -2175,6 +2328,182 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     }
   }
 };
+var LapseButtonsView = class extends import_obsidian.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return "lapse-buttons";
+  }
+  getDisplayText() {
+    return "Quick Start";
+  }
+  getIcon() {
+    return "play-circle";
+  }
+  async onOpen() {
+    await this.render();
+  }
+  async onClose() {
+  }
+  async render() {
+    const container = this.containerEl.children[1];
+    container.empty();
+    container.addClass("lapse-buttons-view");
+    const header = container.createDiv({ cls: "lapse-buttons-header" });
+    header.createEl("h2", { text: "Quick Start" });
+    const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
+    const files = this.app.vault.getMarkdownFiles();
+    const templates = files.filter((file) => file.path.startsWith(templateFolder + "/"));
+    if (templates.length === 0) {
+      container.createEl("p", {
+        text: `No templates found in ${templateFolder}. Configure your template folder in Lapse settings.`,
+        cls: "lapse-buttons-empty"
+      });
+      return;
+    }
+    const templateDataList = [];
+    for (const template of templates) {
+      const templateName = template.basename;
+      let project = null;
+      let projectColor = null;
+      try {
+        const content = await this.app.vault.read(template);
+        const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+        const match = content.match(frontmatterRegex);
+        if (match) {
+          const frontmatter = match[1];
+          const lines = frontmatter.split("\n");
+          for (const line of lines) {
+            if (line.trim().startsWith(this.plugin.settings.projectKey + ":")) {
+              project = line.split(":").slice(1).join(":").trim();
+              if (project) {
+                project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
+                project = project.replace(/^["']+|["']+$/g, "");
+                project = project.trim();
+              }
+              break;
+            }
+          }
+        }
+        if (project) {
+          projectColor = await this.plugin.getProjectColor(project);
+        }
+      } catch (error) {
+        console.error("Error reading template:", error);
+      }
+      templateDataList.push({
+        template,
+        templateName,
+        project,
+        projectColor
+      });
+    }
+    const grouped = /* @__PURE__ */ new Map();
+    for (const data of templateDataList) {
+      const projectKey = data.project || "No Project";
+      if (!grouped.has(projectKey)) {
+        grouped.set(projectKey, []);
+      }
+      grouped.get(projectKey).push(data);
+    }
+    const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
+      if (a === "No Project")
+        return 1;
+      if (b === "No Project")
+        return -1;
+      return a.localeCompare(b);
+    });
+    for (const projectKey of sortedProjects) {
+      const projectTemplates = grouped.get(projectKey);
+      const projectSection = container.createDiv({ cls: "lapse-buttons-project-section" });
+      const projectHeader = projectSection.createDiv({ cls: "lapse-buttons-project-header" });
+      if (projectKey !== "No Project") {
+        const projectColor = projectTemplates[0].projectColor;
+        projectHeader.createEl("h3", {
+          text: projectKey,
+          cls: "lapse-buttons-project-title"
+        });
+        if (projectColor) {
+          projectHeader.style.borderLeftColor = projectColor;
+          projectHeader.querySelector("h3").style.color = projectColor;
+        }
+      } else {
+        projectHeader.createEl("h3", {
+          text: projectKey,
+          cls: "lapse-buttons-project-title"
+        });
+      }
+      const buttonsGrid = projectSection.createDiv({ cls: "lapse-buttons-grid" });
+      for (const data of projectTemplates) {
+        const button = buttonsGrid.createEl("button", { cls: "lapse-button" });
+        const titleEl = button.createDiv({ cls: "lapse-button-name" });
+        titleEl.textContent = data.templateName;
+        if (data.project) {
+          const projectEl = button.createDiv({ cls: "lapse-button-project" });
+          projectEl.textContent = data.project;
+          if (data.projectColor) {
+            button.style.borderLeftColor = data.projectColor;
+            projectEl.style.backgroundColor = data.projectColor;
+            const contrastColor = this.plugin.getContrastColor(data.projectColor);
+            projectEl.style.color = contrastColor;
+          }
+        }
+        button.onclick = async () => {
+          try {
+            const templateContent = await this.app.vault.read(data.template);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
+            const newNoteName = `${data.templateName} ${timestamp}`;
+            const newNotePath = `${newNoteName}.md`;
+            const newFile = await this.app.vault.create(newNotePath, templateContent);
+            await this.app.workspace.getLeaf(false).openFile(newFile);
+          } catch (error) {
+            console.error("Error creating note from template:", error);
+          }
+        };
+      }
+    }
+  }
+};
+var LapseButtonModal = class extends import_obsidian.Modal {
+  constructor(app, plugin, onChoose) {
+    super(app);
+    this.plugin = plugin;
+    this.onChoose = onChoose;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Select template" });
+    const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
+    const files = this.app.vault.getMarkdownFiles();
+    const templates = files.filter((file) => file.path.startsWith(templateFolder + "/"));
+    if (templates.length === 0) {
+      contentEl.createEl("p", {
+        text: `No templates found in ${templateFolder}`,
+        cls: "mod-warning"
+      });
+      return;
+    }
+    const templateList = contentEl.createDiv({ cls: "lapse-template-list" });
+    templates.forEach((template) => {
+      const templateName = template.basename;
+      const button = templateList.createEl("button", {
+        text: templateName,
+        cls: "lapse-template-option"
+      });
+      button.onclick = () => {
+        this.onChoose(templateName);
+        this.close();
+      };
+    });
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+};
 var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -2267,6 +2596,14 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.defaultTagOnTimeEntries = value;
       await this.plugin.saveSettings();
     }));
+    containerEl.createEl("h3", { text: "Lapse Button Templates" });
+    new import_obsidian.Setting(containerEl).setName("Templates folder").setDesc("Folder path containing templates for lapse-button inline buttons (e.g., Templates/Lapse Buttons). Templates should be in your vault's template folder.").addText((text) => text.setPlaceholder("Templates/Lapse Buttons").setValue(this.plugin.settings.lapseButtonTemplatesFolder).onChange(async (value) => {
+      this.plugin.settings.lapseButtonTemplatesFolder = value;
+      await this.plugin.saveSettings();
+    }));
+    containerEl.createDiv({ cls: "setting-item-description" }).createEl("p", {
+      text: "Create buttons in notes using inline code: `lapse:TemplateName`. The button will create a new note from the template and open it."
+    });
     containerEl.createEl("h3", { text: "Timer Controls" });
     new import_obsidian.Setting(containerEl).setName("Show seconds").setDesc("Display seconds in timer").addToggle((toggle) => toggle.setValue(this.plugin.settings.showSeconds).onChange(async (value) => {
       this.plugin.settings.showSeconds = value;
@@ -2292,6 +2629,60 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       ul.createEl("li", { text: "**/2020/** - 2020 folder at any depth" });
       ul.createEl("li", { text: "**/Archive - Any folder ending in Archive" });
     });
+    containerEl.createEl("h3", { text: "Cache Management" });
+    const cacheSize = Object.keys(this.plugin.entryCache).length;
+    const cacheInfoSetting = new import_obsidian.Setting(containerEl).setName("Entry cache").setDesc(`Currently caching ${cacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
+    new import_obsidian.Setting(containerEl).setName("Clear cache").setDesc("Delete all cached time entries. The cache will automatically rebuild as you use the plugin. Use this if you're experiencing issues or want to free up space.").addButton((button) => button.setButtonText("Clear Cache").setWarning().onClick(async () => {
+      const confirmed = confirm(
+        `Clear cache for ${cacheSize} files?
+
+This will delete all cached time entries. Your timer data in notes is safe. The cache will rebuild automatically as you use the plugin.`
+      );
+      if (confirmed) {
+        this.plugin.entryCache = {};
+        await this.plugin.saveSettings();
+        cacheInfoSetting.setDesc("Currently caching 0 files. The cache speeds up reports and activity views by storing time entry data.");
+        button.setButtonText("Cache Cleared!");
+        setTimeout(() => {
+          button.setButtonText("Clear Cache");
+        }, 2e3);
+      }
+    }));
+    new import_obsidian.Setting(containerEl).setName("Rebuild cache").setDesc("Force a complete rebuild of the cache by scanning all markdown files in your vault. This may take a while for large vaults.").addButton((button) => button.setButtonText("Rebuild Cache").onClick(async () => {
+      button.setButtonText("Rebuilding...");
+      button.setDisabled(true);
+      try {
+        this.plugin.entryCache = {};
+        const files = this.app.vault.getMarkdownFiles();
+        let processedCount = 0;
+        for (const file of files) {
+          const filePath = file.path;
+          if (this.plugin.isFileExcluded(filePath)) {
+            continue;
+          }
+          await this.plugin.getCachedOrLoadEntries(filePath);
+          processedCount++;
+          if (processedCount % 100 === 0) {
+            button.setButtonText(`Rebuilding... ${processedCount}/${files.length}`);
+          }
+        }
+        await this.plugin.saveSettings();
+        const newCacheSize = Object.keys(this.plugin.entryCache).length;
+        cacheInfoSetting.setDesc(`Currently caching ${newCacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
+        button.setButtonText("Rebuild Complete!");
+        setTimeout(() => {
+          button.setButtonText("Rebuild Cache");
+          button.setDisabled(false);
+        }, 3e3);
+      } catch (error) {
+        console.error("Lapse: Error rebuilding cache", error);
+        button.setButtonText("Rebuild Failed");
+        setTimeout(() => {
+          button.setButtonText("Rebuild Cache");
+          button.setDisabled(false);
+        }, 3e3);
+      }
+    }));
   }
 };
 var LapseReportsView = class extends import_obsidian.ItemView {

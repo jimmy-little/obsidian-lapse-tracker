@@ -92,8 +92,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 32px;
-    height: 32px;
+    min-width: 32px;    height: 32px;
     flex-shrink: 0;
 }
 
@@ -1036,4 +1035,146 @@
     font-variant-numeric: tabular-nums;
     color: var(--text-muted);
     font-weight: 500;
+}
+
+/* Lapse Button Styles */
+
+.lapse-button {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    border-radius: 8px;
+    border: 2px solid var(--background-modifier-border);
+    border-left-width: 4px;
+    background-color: var(--background-secondary);
+    color: var(--text-normal);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin: 4px;
+    width: 280px;
+    height: 80px;
+    box-sizing: border-box;
+    vertical-align: top;
+}
+
+.lapse-button:hover {
+    background-color: var(--background-modifier-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.lapse-button:active {
+    transform: translateY(0);
+}
+
+.lapse-button-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-normal);
+    width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+}
+
+.lapse-button-project {
+    font-size: 12px;
+    font-weight: 500;
+    margin-top: 8px;
+    line-height: 1.5;
+    padding: 5px 10px;
+    border-radius: 14px;
+    background-color: var(--background-primary-alt);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 20px);
+}
+
+.lapse-button-error {
+    background-color: var(--background-primary);
+    border-color: var(--background-modifier-error);
+    color: var(--text-error);
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+.lapse-button-error:hover {
+    transform: none;
+    box-shadow: none;
+    opacity: 0.7;
+    background-color: var(--background-primary);
+}
+
+/* Lapse Template Modal */
+
+.lapse-template-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.lapse-template-option {
+    padding: 12px 16px;
+    text-align: left;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s ease;
+}
+
+.lapse-template-option:hover {
+    background-color: var(--background-modifier-hover);
+    border-color: var(--interactive-accent);
+}
+
+/* Lapse Buttons View */
+
+.lapse-buttons-view {
+    padding: 16px;
+}
+
+.lapse-buttons-header {
+    margin-bottom: 20px;
+}
+
+.lapse-buttons-header h2 {
+    margin: 0;
+    font-size: 24px;
+}
+
+.lapse-buttons-project-section {
+    margin-bottom: 32px;
+}
+
+.lapse-buttons-project-header {
+    margin-bottom: 12px;
+    padding-left: 12px;
+    border-left: 4px solid var(--background-modifier-border);
+}
+
+.lapse-buttons-project-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.lapse-buttons-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.lapse-buttons-empty {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 20px;
 }
