@@ -64,6 +64,23 @@ chart: pie
 ```
 ````
 
+### Active Timers List
+
+Display a simplified list of all currently active timers across your vault:
+
+````markdown
+```lapse-active
+```
+````
+
+This shows a clean, single-line view for each active timer with:
+- **Elapsed time** (updates every second)
+- **Timer label** (read-only)
+- **Jump to note button** (arrow icon) - Opens the source note
+- **Stop button** - Stops the timer without opening the note
+
+Perfect for creating a dashboard note to monitor all active work across your vault.
+
 #### Query Options
 
 **Filters:**
@@ -218,6 +235,20 @@ Configure how default labels are determined:
     - `**/Archive` - Exclude any folder ending in "Archive"
   - Improves performance for large vaults
   - Reduces cache size and memory usage
+
+### Cache Management
+
+- **Entry cache**: Displays the number of files currently cached
+- **Clear cache**: Delete all cached time entries
+  - Your timer data in notes is safe (stored in frontmatter)
+  - Cache rebuilds automatically as you use the plugin
+  - Use this to troubleshoot issues or free up space
+- **Rebuild cache**: Force a complete cache rebuild
+  - Scans all markdown files in your vault
+  - May take a while for large vaults
+  - Useful after bulk changes to notes
+
+**Cache Location**: `.obsidian/plugins/lapse-tracker/data.json` (in the `entryCache` field)
 
 ### Frontmatter Keys
 

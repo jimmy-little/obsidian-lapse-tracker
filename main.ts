@@ -19,6 +19,9 @@ interface LapseSettings {
 	firstDayOfWeek: number; // 0 = Sunday, 1 = Monday, etc.
 	excludedFolders: string[]; // Glob patterns for folders to exclude
 	showStatusBar: boolean; // Show active timer(s) in status bar
+	activityShowNoteTitle: boolean; // Show note title in Activity view
+	activityShowProject: boolean; // Show project in Activity view
+	activityShowEntryLabel: boolean; // Show entry label in Activity view
 }
 
 const DEFAULT_SETTINGS: LapseSettings = {
@@ -39,7 +42,10 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	timeAdjustMinutes: 5,
 	firstDayOfWeek: 0, // 0 = Sunday
 	excludedFolders: [], // No folders excluded by default
-	showStatusBar: true // Show active timers in status bar by default
+	showStatusBar: true, // Show active timers in status bar by default
+	activityShowNoteTitle: true, // Show note title in Activity view by default
+	activityShowProject: true, // Show project in Activity view by default
+	activityShowEntryLabel: true // Show entry label in Activity view by default
 }
 
 interface TimeEntry {
@@ -83,10 +89,8 @@ interface EntryCache {
 export default class LapsePlugin extends Plugin {
 	settings: LapseSettings;
 	timeData: Map<string, PageTimeData> = new Map();
-	entryCache: EntryCache = {}; // Persistent cache indexed by file path
+	entryCache: EntryCache = {}; // In-memory cache indexed by file path (lazy-loaded)
 	cacheSaveTimeout: number | null = null; // Debounce cache saves
-	cacheLoading: boolean = false; // Track if cache is still loading
-	cacheLoaded: Promise<void> | null = null; // Promise to wait for cache loading
 	statusBarItem: HTMLElement | null = null; // Status bar element
 	statusBarUpdateInterval: number | null = null; // Interval for updating status bar
 	pendingSaves: Promise<void>[] = []; // Track pending save operations
@@ -97,9 +101,34 @@ export default class LapsePlugin extends Plugin {
 
 		console.log(`Lapse: Plugin loading... (${Date.now() - pluginStartTime}ms)`);
 
+		// Listen to metadata cache changes to automatically invalidate stale cache entries
+		this.registerEvent(
+			this.app.metadataCache.on('changed', (file) => {
+				// Invalidate cache for this file when its metadata changes
+				this.invalidateCacheForFile(file.path);
+			})
+		);
+
+		// Also invalidate on file deletion/rename
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				this.invalidateCacheForFile(file.path);
+				// Also remove from in-memory timeData
+				this.timeData.delete(file.path);
+			})
+		);
+
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				this.invalidateCacheForFile(oldPath);
+				this.timeData.delete(oldPath);
+			})
+		);
+
 		// Register the code block processors
 		this.registerMarkdownCodeBlockProcessor('lapse', this.processTimerCodeBlock.bind(this));
 		this.registerMarkdownCodeBlockProcessor('lapse-report', this.processReportCodeBlock.bind(this));
+		this.registerMarkdownCodeBlockProcessor('lapse-active', this.processActiveTimersCodeBlock.bind(this));
 
 		// Register the sidebar view
 		this.registerView(
@@ -525,41 +554,83 @@ export default class LapsePlugin extends Plugin {
 			const tagName = defaultTag.startsWith('#') ? defaultTag.substring(1) : defaultTag;
 
 			if (match) {
-				// Check if tag already exists in frontmatter
 				const frontmatter = match[1];
-				if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
-					// Tags already exist, check if our tag is there
-					const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]\n]+)\]?/);
-					if (tagsMatch) {
-						const existingTags = tagsMatch[1].split(',').map(t => t.trim().replace(/['"#]/g, ''));
-						if (existingTags.includes(tagName)) {
-							return; // Tag already exists
-						}
+				const lines = frontmatter.split('\n');
+				
+				// Find if tags already exist and what format they're in
+				let tagsLineIndex = -1;
+				let isMultilineArray = false;
+				
+				for (let i = 0; i < lines.length; i++) {
+					const line = lines[i];
+					if (line.match(/^tags?:\s*$/)) {
+						// Multiline array format: tags: (followed by - items on next lines)
+						tagsLineIndex = i;
+						isMultilineArray = true;
+						break;
+					} else if (line.match(/^tags?:\s+\[/)) {
+						// Inline array format: tags: [...]
+						tagsLineIndex = i;
+						isMultilineArray = false;
+						break;
+					} else if (line.match(/^tags?:\s+[^[\n]/)) {
+						// Single value format: tags: value
+						tagsLineIndex = i;
+						isMultilineArray = false;
+						break;
 					}
-					// Add tag to existing tags - use multiline flag and match only on the tags line
-					const newContent = content.replace(
-						/(^tags?:\s*)(.+?)$/m,
-						(match, prefix, existingTagsStr) => {
-							// Parse existing tags - handle both array [a, b] and single value formats
+				}
+				
+				if (tagsLineIndex >= 0) {
+					// Tags field exists
+					if (isMultilineArray) {
+						// Check if tag already exists in multiline array
+						let tagExists = false;
+						for (let i = tagsLineIndex + 1; i < lines.length; i++) {
+							const line = lines[i].trim();
+							if (!line.startsWith('-')) break; // End of array
+							const existingTag = line.replace(/^-\s*/, '').replace(/['"]/g, '').trim();
+							if (existingTag === tagName) {
+								tagExists = true;
+								break;
+							}
+						}
+						
+						if (!tagExists) {
+							// Add to multiline array - insert after tags: line
+							lines.splice(tagsLineIndex + 1, 0, `  - ${tagName}`);
+							const newFrontmatter = lines.join('\n');
+							const newContent = content.replace(frontmatterRegex, `---\n${newFrontmatter}\n---`);
+							await this.app.vault.modify(file, newContent);
+						}
+					} else {
+						// Inline format - parse existing tags
+						const tagsLine = lines[tagsLineIndex];
+						const tagsMatch = tagsLine.match(/^tags?:\s*(.+)$/);
+						if (tagsMatch) {
+							const existingTagsStr = tagsMatch[1];
 							let tagList: string[] = [];
+							
 							const arrayMatch = existingTagsStr.match(/\[(.+)\]/);
 							if (arrayMatch) {
 								// Array format: tags: [a, b]
 								tagList = arrayMatch[1].split(',').map((t: string) => t.trim().replace(/['"#]/g, '')).filter((t: string) => t);
 							} else {
-								// Single value or space-separated: tags: #meeting or tags: meeting
-								tagList = existingTagsStr.split(/[\s,]+/).map((t: string) => t.trim().replace(/['"#]/g, '')).filter((t: string) => t);
+								// Single value
+								tagList = [existingTagsStr.trim().replace(/['"#]/g, '')];
 							}
 							
 							if (!tagList.includes(tagName)) {
 								tagList.push(tagName);
+								lines[tagsLineIndex] = `tags: [${tagList.map((t: string) => `"${t}"`).join(', ')}]`;
+								const newFrontmatter = lines.join('\n');
+								const newContent = content.replace(frontmatterRegex, `---\n${newFrontmatter}\n---`);
+								await this.app.vault.modify(file, newContent);
 							}
-							return `${prefix}[${tagList.map((t: string) => `"${t}"`).join(', ')}]`;
 						}
-					);
-					await this.app.vault.modify(file, newContent);
+					}
 				} else {
-					// Add tags field to frontmatter
+					// No tags field - add it as inline array
 					const newFrontmatter = frontmatter + `\ntags: ["${tagName}"]`;
 					const newContent = content.replace(frontmatterRegex, `---\n${newFrontmatter}\n---`);
 					await this.app.vault.modify(file, newContent);
@@ -1778,6 +1849,158 @@ export default class LapsePlugin extends Plugin {
 		});
 	}
 
+	async processActiveTimersCodeBlock(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
+		// Create container
+		const container = el.createDiv({ cls: 'lapse-active-container' });
+		
+		// Function to render active timers
+		const renderActiveTimers = async () => {
+			container.empty();
+			
+			// Get all active timers from all files
+			const activeTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
+			
+			// First, always check the current file (important for same-page timers)
+			const currentFile = this.app.workspace.getActiveFile();
+			if (currentFile) {
+				const currentFilePath = currentFile.path;
+				// Force load from frontmatter for current file to ensure fresh data
+				await this.loadEntriesFromFrontmatter(currentFilePath);
+				
+				const currentPageData = this.timeData.get(currentFilePath);
+				if (currentPageData) {
+					currentPageData.entries.forEach(entry => {
+						if (entry.startTime && !entry.endTime) {
+							activeTimers.push({ filePath: currentFilePath, entry });
+						}
+					});
+				}
+			}
+			
+			// Check other entries already loaded in memory
+			this.timeData.forEach((pageData, filePath) => {
+				// Skip current file since we already checked it
+				if (currentFile && filePath === currentFile.path) {
+					return;
+				}
+				
+				pageData.entries.forEach(entry => {
+					if (entry.startTime && !entry.endTime) {
+						activeTimers.push({ filePath, entry });
+					}
+				});
+			});
+			
+			// Also check all other markdown files for active timers not yet in memory
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			for (const file of markdownFiles) {
+				const filePath = file.path;
+				
+				// Skip excluded folders
+				if (this.isFileExcluded(filePath)) {
+					continue;
+				}
+				
+				// Skip if already checked (including current file)
+				if (this.timeData.has(filePath)) {
+					continue;
+				}
+				
+				// Load entries from cache or frontmatter
+				const { entries } = await this.getCachedOrLoadEntries(filePath);
+				entries.forEach(entry => {
+					if (entry.startTime && !entry.endTime) {
+						activeTimers.push({ filePath, entry });
+					}
+				});
+			}
+			
+			// If no active timers, show message
+			if (activeTimers.length === 0) {
+				container.createEl('p', { text: 'No active timers', cls: 'lapse-active-empty' });
+				return;
+			}
+			
+			// Render each active timer as a simple row
+			for (const { filePath, entry } of activeTimers) {
+				const row = container.createDiv({ cls: 'lapse-active-row' });
+				
+				// Elapsed time
+				const elapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime!));
+				const timeText = this.formatTimeAsHHMMSS(elapsed);
+				const timeDisplay = row.createDiv({ 
+					text: timeText, 
+					cls: 'lapse-active-time' 
+				});
+				
+				// Label (read-only)
+				const labelDisplay = row.createDiv({ 
+					text: entry.label, 
+					cls: 'lapse-active-label' 
+				});
+				
+				// Action buttons container
+				const actionsContainer = row.createDiv({ cls: 'lapse-active-actions' });
+				
+				// Jump to note button
+				const jumpBtn = actionsContainer.createEl('button', {
+					cls: 'lapse-active-btn lapse-active-btn-jump',
+					attr: { 'aria-label': 'Jump to note' }
+				});
+				setIcon(jumpBtn, 'arrow-right');
+				jumpBtn.onclick = async () => {
+					await this.app.workspace.openLinkText(filePath, '', true);
+				};
+				
+				// Stop button
+				const stopBtn = actionsContainer.createEl('button', {
+					cls: 'lapse-active-btn lapse-active-btn-stop',
+					attr: { 'aria-label': 'Stop timer' }
+				});
+				setIcon(stopBtn, 'square');
+				stopBtn.onclick = async (e) => {
+					e.stopPropagation();
+					// Stop the timer
+					entry.endTime = Date.now();
+					entry.duration += (Date.now() - entry.startTime!);
+					entry.startTime = null;
+					
+					// Update frontmatter in the background
+					await this.updateFrontmatter(filePath);
+					
+					// Re-render to update the list
+					await renderActiveTimers();
+				};
+				
+				// Update elapsed time every second
+				const intervalId = window.setInterval(() => {
+					if (entry.startTime && !entry.endTime) {
+						const newElapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime));
+						timeDisplay.setText(this.formatTimeAsHHMMSS(newElapsed));
+					} else {
+						// Timer stopped, clear interval
+						window.clearInterval(intervalId);
+					}
+				}, 1000);
+			}
+		};
+		
+		// Initial render
+		await renderActiveTimers();
+		
+		// Refresh every 5 seconds to catch new timers
+		const refreshInterval = window.setInterval(async () => {
+			await renderActiveTimers();
+		}, 5000);
+		
+		// Clean up interval when the element is removed
+		ctx.addChild({
+			unload: () => {
+				window.clearInterval(refreshInterval);
+			}
+		} as any);
+	}
+
 	renderEntryCards(cardsContainer: HTMLElement, entries: TimeEntry[], filePath: string, labelDisplay?: HTMLElement, labelInput?: HTMLInputElement | null) {
 		cardsContainer.empty();
 
@@ -2297,76 +2520,17 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const startTime = Date.now();
 		const data = await this.loadData();
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		
-		// Load entry cache if it exists
-		if (data && data.entryCache) {
-			const cacheSize = Object.keys(data.entryCache).length;
-			
-			// For very large caches (>5000 files), warn and consider pruning
-			if (cacheSize > 5000) {
-				console.warn(`Lapse: Large cache detected (${cacheSize} files). Consider clearing cache if experiencing slowdowns.`);
-				
-				// Prune cache to only keep entries from last 90 days
-				const ninetyDaysAgo = Date.now() - (90 * 24 * 60 * 60 * 1000);
-				const prunedCache: EntryCache = {};
-				let prunedCount = 0;
-				
-				for (const [filePath, cached] of Object.entries(data.entryCache as EntryCache)) {
-					// Keep if any entries are recent
-					const hasRecentEntries = cached.entries.some((e: TimeEntry) => 
-						(e.startTime && e.startTime > ninetyDaysAgo) || 
-						(e.endTime && e.endTime > ninetyDaysAgo)
-					);
-					
-					if (hasRecentEntries || cached.lastModified > ninetyDaysAgo) {
-						prunedCache[filePath] = cached;
-					} else {
-						prunedCount++;
-					}
-				}
-				
-				console.log(`Lapse: Pruned ${prunedCount} old cache entries, keeping ${Object.keys(prunedCache).length} recent files`);
-				data.entryCache = prunedCache;
-			}
-			
-			const finalCacheSize = Object.keys(data.entryCache).length;
-			console.log(`Lapse: Loading cache with ${finalCacheSize} files...`);
-			
-			// For large caches, load in background to avoid blocking plugin init
-			if (finalCacheSize > 100) {
-				this.cacheLoading = true;
-				// Load cache asynchronously without blocking
-				this.cacheLoaded = new Promise<void>((resolve) => {
-					setTimeout(async () => {
-						this.entryCache = data.entryCache;
-						this.cacheLoading = false;
-						const loadTime = Date.now() - startTime;
-						console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
-						
-						// Save pruned cache if we pruned anything
-						if (finalCacheSize < cacheSize) {
-							await this.saveCache();
-						}
-						
-						resolve();
-					}, 0);
-				});
-			} else {
-				this.entryCache = data.entryCache;
-				const loadTime = Date.now() - startTime;
-				console.log(`Lapse: Cache loaded (${finalCacheSize} files) in ${loadTime}ms`);
-			}
-		}
+		// Don't load the large cache on startup - use on-demand loading instead
+		// This allows plugin to load instantly
+		console.log('Lapse: Settings loaded (cache will load on-demand)');
 	}
 
 	async saveSettings() {
-		await this.saveData({
-			...this.settings,
-			entryCache: this.entryCache
-		});
+		// Only save settings, not the cache
+		await this.saveData(this.settings);
 	}
 
 	async saveCache() {
@@ -2379,9 +2543,10 @@ export default class LapsePlugin extends Plugin {
 		const savePromise = new Promise<void>((resolve) => {
 			this.cacheSaveTimeout = window.setTimeout(async () => {
 				try {
-					// Save just the cache without triggering full settings save
+					// Save cache separately from settings
+					const data = await this.loadData();
 					await this.saveData({
-						...this.settings,
+						...data,
 						entryCache: this.entryCache
 					});
 				} finally {
@@ -2407,22 +2572,19 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async getCachedOrLoadEntries(filePath: string): Promise<{ entries: TimeEntry[]; project: string | null; totalTime: number }> {
-		// Wait for cache to finish loading if it's still in progress
-		if (this.cacheLoading && this.cacheLoaded) {
-			await this.cacheLoaded;
-		}
-		
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (!file || !(file instanceof TFile)) {
 			return { entries: [], project: null, totalTime: 0 };
 		}
 
+		// Use Obsidian's metadata cache to get file modification time instantly
+		const fileCache = this.app.metadataCache.getFileCache(file);
 		const currentMtime = file.stat.mtime;
 		const cached = this.entryCache[filePath];
 
-		// Check if cache is valid (file hasn't been modified)
+		// Check if cache is valid using mtime (instant check, no disk I/O)
 		if (cached && cached.lastModified === currentMtime) {
-			// Cache hit - return cached data
+			// Cache hit - return cached data instantly
 			return {
 				entries: cached.entries,
 				project: cached.project,
@@ -2430,7 +2592,7 @@ export default class LapsePlugin extends Plugin {
 			};
 		}
 
-		// Cache miss or stale - load from frontmatter
+		// Cache miss or stale - load from frontmatter (only when needed)
 		await this.loadEntriesFromFrontmatter(filePath);
 		const pageData = this.timeData.get(filePath);
 		const project = await this.getProjectFromFrontmatter(filePath);
@@ -2438,7 +2600,7 @@ export default class LapsePlugin extends Plugin {
 		const entries = pageData ? pageData.entries : [];
 		const totalTime = pageData ? pageData.totalTimeTracked : 0;
 
-		// Update cache
+		// Update in-memory cache
 		this.entryCache[filePath] = {
 			lastModified: currentMtime,
 			entries: entries,
@@ -2446,8 +2608,8 @@ export default class LapsePlugin extends Plugin {
 			totalTime: totalTime
 		};
 
-		// Save cache to disk (debounced in real usage, but immediate for now)
-		await this.saveCache();
+		// Debounced save to disk (non-blocking)
+		this.saveCache();
 
 		return { entries, project, totalTime };
 	}
@@ -2459,6 +2621,8 @@ class LapseSidebarView extends ItemView {
 	timeDisplays: Map<string, HTMLElement> = new Map(); // Map of entry ID to time display element
 	showTodayEntries: boolean = true; // Toggle for showing/hiding individual entries
 	refreshCounter: number = 0; // Counter for periodic full refreshes
+	showEntriesList: boolean = true; // Toggle for showing/hiding the entries list section
+	showChart: boolean = true; // Toggle for showing/hiding the chart section
 
 	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
 		super(leaf);
@@ -2486,11 +2650,36 @@ class LapseSidebarView extends ItemView {
 		container.empty();
 		this.timeDisplays.clear();
 		
-		// Header with title and refresh button
+		// Header with title and toggle buttons
 		const header = container.createDiv({ cls: 'lapse-sidebar-header' });
 		header.createEl('h4', { text: 'Activity' });
 		
-		const refreshBtn = header.createEl('button', { 
+		const headerButtons = header.createDiv({ cls: 'lapse-sidebar-header-buttons' });
+		
+		// List toggle button
+		const listBtn = headerButtons.createEl('button', { 
+			cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showEntriesList ? 'active' : ''}`,
+			attr: { 'aria-label': 'Toggle entries list' }
+		});
+		setIcon(listBtn, 'list');
+		listBtn.onclick = () => {
+			this.showEntriesList = !this.showEntriesList;
+			this.render();
+		};
+		
+		// Chart toggle button
+		const chartBtn = headerButtons.createEl('button', { 
+			cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showChart ? 'active' : ''}`,
+			attr: { 'aria-label': 'Toggle chart' }
+		});
+		setIcon(chartBtn, 'pie-chart');
+		chartBtn.onclick = () => {
+			this.showChart = !this.showChart;
+			this.render();
+		};
+		
+		// Refresh button
+		const refreshBtn = headerButtons.createEl('button', { 
 			cls: 'lapse-sidebar-refresh-btn clickable-icon',
 			attr: { 'aria-label': 'Refresh' }
 		});
@@ -2518,14 +2707,37 @@ class LapseSidebarView extends ItemView {
 			for (const { filePath, entry } of activeTimers) {
 				const card = container.createDiv({ cls: 'lapse-activity-card' });
 				
+				// Header row with timer and stop button
+				const cardHeader = card.createDiv({ cls: 'lapse-activity-card-header' });
+				
 				// Timer display - big and centered
 				const elapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime!));
 				const timeText = this.plugin.formatTimeAsHHMMSS(elapsed);
-				const timerDisplay = card.createDiv({ 
+				const timerDisplay = cardHeader.createDiv({ 
 					text: timeText, 
 					cls: 'lapse-activity-timer' 
 				});
 				this.timeDisplays.set(entry.id, timerDisplay);
+				
+				// Stop button
+				const stopBtn = cardHeader.createEl('button', {
+					cls: 'lapse-activity-stop-btn',
+					attr: { 'aria-label': 'Stop timer' }
+				});
+				setIcon(stopBtn, 'square');
+				stopBtn.onclick = async (e) => {
+					e.stopPropagation();
+					// Stop the timer by updating the entry
+					entry.endTime = Date.now();
+					entry.duration += (Date.now() - entry.startTime!);
+					entry.startTime = null;
+					
+					// Update frontmatter in the background
+					await this.plugin.updateFrontmatter(filePath);
+					
+					// Refresh the view
+					await this.render();
+				};
 				
 				// Get file name without extension
 				const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -2539,178 +2751,189 @@ class LapseSidebarView extends ItemView {
 				// Details container - smaller text below timer
 				const detailsContainer = card.createDiv({ cls: 'lapse-activity-details' });
 				
-				// Create link to the note
-				const link = detailsContainer.createEl('a', { 
-					text: fileName,
-					cls: 'lapse-activity-page internal-link',
-					href: filePath
-				});
-				
-				// Add click handler to open the note
-				link.onclick = (e) => {
-					e.preventDefault();
-					const file = this.app.vault.getAbstractFileByPath(filePath);
-					if (file && file instanceof TFile) {
-						this.app.workspace.openLinkText(filePath, '', false);
-					}
-				};
+				// Create link to the note (if enabled)
+				if (this.plugin.settings.activityShowNoteTitle) {
+					const link = detailsContainer.createEl('a', { 
+						text: fileName,
+						cls: 'lapse-activity-page internal-link',
+						href: filePath
+					});
+					
+					// Add click handler to open the note
+					link.onclick = (e) => {
+						e.preventDefault();
+						const file = this.app.vault.getAbstractFileByPath(filePath);
+						if (file && file instanceof TFile) {
+							this.app.workspace.openLinkText(filePath, '', false);
+						}
+					};
+				}
 				
 				// Get project from frontmatter
 				const project = await this.plugin.getProjectFromFrontmatter(filePath);
 				
-				// Project (if available)
-				if (project) {
+				// Project (if available and enabled)
+				if (project && this.plugin.settings.activityShowProject) {
 					detailsContainer.createDiv({ text: project, cls: 'lapse-activity-project' });
 				}
 				
-				// Entry label
-				detailsContainer.createDiv({ text: entry.label, cls: 'lapse-activity-label' });
+				// Entry label (if enabled)
+				if (this.plugin.settings.activityShowEntryLabel) {
+					detailsContainer.createDiv({ text: entry.label, cls: 'lapse-activity-label' });
+				}
 			}
 		}
 
-		// Get today's entries and group by note
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
-		const todayStart = today.getTime();
-		
-		const todayEntries: Array<{ filePath: string; entry: TimeEntry; startTime: number }> = [];
-		
-		// First, get entries from memory
-		this.plugin.timeData.forEach((pageData, filePath) => {
-			pageData.entries.forEach(entry => {
-				if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
-					todayEntries.push({ filePath, entry, startTime: entry.startTime });
-				}
-			});
-		});
-		
-		// Also check all files using cache for fast access
-		const markdownFiles = this.app.vault.getMarkdownFiles();
-		
-		for (const file of markdownFiles) {
-			const filePath = file.path;
+		// Get today's entries and group by note (only if entries list is visible)
+		if (this.showEntriesList) {
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStart = today.getTime();
 			
-			// Skip excluded folders
-			if (this.plugin.isFileExcluded(filePath)) {
-				continue;
-			}
+			const todayEntries: Array<{ filePath: string; entry: TimeEntry; startTime: number }> = [];
 			
-			// Skip if already checked in memory
-			if (this.plugin.timeData.has(filePath)) {
-				continue;
-			}
-			
-			// Use cached data or load if needed
-			const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
-			
-			for (const entry of fileEntries) {
-				if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
-					todayEntries.push({ filePath, entry, startTime: entry.startTime });
-				}
-			}
-		}
-		
-		// Group entries by filePath
-		const entriesByNote = new Map<string, Array<{ entry: TimeEntry; startTime: number }>>();
-		todayEntries.forEach(({ filePath, entry, startTime }) => {
-			if (!entriesByNote.has(filePath)) {
-				entriesByNote.set(filePath, []);
-			}
-			entriesByNote.get(filePath)!.push({ entry, startTime });
-		});
-		
-		// Sort entries within each note (newest to oldest)
-		entriesByNote.forEach((entries) => {
-			entries.sort((a, b) => b.startTime - a.startTime);
-		});
-		
-		// Convert to array and sort by newest entry per note
-		const noteGroups = Array.from(entriesByNote.entries()).map(([filePath, entries]) => {
-			const totalTime = entries.reduce((sum, { entry }) => sum + entry.duration, 0);
-			const newestStartTime = Math.max(...entries.map(e => e.startTime));
-			return { filePath, entries, totalTime, newestStartTime };
-		});
-		
-		// Sort notes by newest entry (newest to oldest)
-		noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
-		
-		// Display today's entries grouped by note
-		if (noteGroups.length > 0) {
-			// Section header with toggle button
-			const sectionHeader = container.createDiv({ cls: 'lapse-sidebar-section-header' });
-			sectionHeader.createEl('h4', { text: "Today's Entries", cls: 'lapse-sidebar-section-title' });
-			
-			const toggleBtn = sectionHeader.createEl('button', {
-				cls: 'lapse-sidebar-toggle-btn clickable-icon',
-				attr: { 'aria-label': this.showTodayEntries ? 'Hide entries' : 'Show entries' }
-			});
-			setIcon(toggleBtn, this.showTodayEntries ? 'chevron-down' : 'chevron-right');
-			toggleBtn.onclick = () => {
-				this.showTodayEntries = !this.showTodayEntries;
-				this.render();
-			};
-			
-			const todayList = container.createEl('ul', { cls: 'lapse-sidebar-list' });
-			
-			for (const { filePath, entries, totalTime } of noteGroups) {
-				const item = todayList.createEl('li', { cls: 'lapse-sidebar-note-group' });
-				
-				// Top line container - note name and total time
-				const topLine = item.createDiv({ cls: 'lapse-sidebar-top-line' });
-				
-			// Get file name without extension
-			const file = this.app.vault.getAbstractFileByPath(filePath);
-			let fileName = file && file instanceof TFile ? file.basename : filePath.split('/').pop()?.replace('.md', '') || filePath;
-			
-			// Hide timestamps if setting is enabled
-			if (this.plugin.settings.hideTimestampsInViews) {
-				fileName = this.plugin.removeTimestampFromFileName(fileName);
-			}
-			
-			// Create link to the note (without brackets)
-			const link = topLine.createEl('a', { 
-				text: fileName,
-				cls: 'internal-link',
-				href: filePath
-			});
-				
-				// Add click handler to open the note
-				link.onclick = (e) => {
-					e.preventDefault();
-					const file = this.app.vault.getAbstractFileByPath(filePath);
-					if (file && file instanceof TFile) {
-						this.app.workspace.openLinkText(filePath, '', false);
+			// First, get entries from memory
+			this.plugin.timeData.forEach((pageData, filePath) => {
+				pageData.entries.forEach(entry => {
+					if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+						todayEntries.push({ filePath, entry, startTime: entry.startTime });
 					}
+				});
+			});
+			
+			// Also check all files using cache for fast access
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			
+			for (const file of markdownFiles) {
+				const filePath = file.path;
+				
+				// Skip excluded folders
+				if (this.plugin.isFileExcluded(filePath)) {
+					continue;
+				}
+				
+				// Skip if already checked in memory
+				if (this.plugin.timeData.has(filePath)) {
+					continue;
+				}
+				
+				// Use cached data or load if needed
+				const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
+				
+				for (const entry of fileEntries) {
+					if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+						todayEntries.push({ filePath, entry, startTime: entry.startTime });
+					}
+				}
+			}
+			
+			// Group entries by filePath
+			const entriesByNote = new Map<string, Array<{ entry: TimeEntry; startTime: number }>>();
+			todayEntries.forEach(({ filePath, entry, startTime }) => {
+				if (!entriesByNote.has(filePath)) {
+					entriesByNote.set(filePath, []);
+				}
+				entriesByNote.get(filePath)!.push({ entry, startTime });
+			});
+			
+			// Sort entries within each note (newest to oldest)
+			entriesByNote.forEach((entries) => {
+				entries.sort((a, b) => b.startTime - a.startTime);
+			});
+			
+			// Convert to array and sort by newest entry per note
+			const noteGroups = Array.from(entriesByNote.entries()).map(([filePath, entries]) => {
+				const totalTime = entries.reduce((sum, { entry }) => sum + entry.duration, 0);
+				const newestStartTime = Math.max(...entries.map(e => e.startTime));
+				return { filePath, entries, totalTime, newestStartTime };
+			});
+			
+			// Sort notes by newest entry (newest to oldest)
+			noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
+			
+			// Display today's entries grouped by note
+			if (noteGroups.length > 0) {
+				// Section header with toggle button
+				const sectionHeader = container.createDiv({ cls: 'lapse-sidebar-section-header' });
+				sectionHeader.createEl('h4', { text: "Today's Entries", cls: 'lapse-sidebar-section-title' });
+				
+				const toggleBtn = sectionHeader.createEl('button', {
+					cls: 'lapse-sidebar-toggle-btn clickable-icon',
+					attr: { 'aria-label': this.showTodayEntries ? 'Hide entries' : 'Show entries' }
+				});
+				setIcon(toggleBtn, this.showTodayEntries ? 'chevron-down' : 'chevron-right');
+				toggleBtn.onclick = () => {
+					this.showTodayEntries = !this.showTodayEntries;
+					this.render();
 				};
 				
-				// Total time tracked on the right
-				const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
-				topLine.createSpan({ text: timeText, cls: 'lapse-sidebar-time' });
+				const todayList = container.createEl('ul', { cls: 'lapse-sidebar-list' });
 				
-				// Get project from frontmatter
-				const project = await this.plugin.getProjectFromFrontmatter(filePath);
-				
-				// Second line: project (if available)
-				if (project) {
-					const secondLine = item.createDiv({ cls: 'lapse-sidebar-second-line' });
-					secondLine.createSpan({ text: project, cls: 'lapse-sidebar-project' });
-				}
-				
-				// List individual entries below (only if toggled on)
-				if (this.showTodayEntries) {
-					const entriesList = item.createDiv({ cls: 'lapse-sidebar-entries-list' });
-					entries.forEach(({ entry }) => {
-						const entryLine = entriesList.createDiv({ cls: 'lapse-sidebar-entry-line' });
-						const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
-						entryLine.createSpan({ text: entry.label, cls: 'lapse-sidebar-entry-label' });
-						entryLine.createSpan({ text: entryTime, cls: 'lapse-sidebar-entry-time' });
+				for (const { filePath, entries, totalTime } of noteGroups) {
+					const item = todayList.createEl('li', { cls: 'lapse-sidebar-note-group' });
+					
+					// Top line container - note name and total time
+					const topLine = item.createDiv({ cls: 'lapse-sidebar-top-line' });
+					
+					// Get file name without extension
+					const file = this.app.vault.getAbstractFileByPath(filePath);
+					let fileName = file && file instanceof TFile ? file.basename : filePath.split('/').pop()?.replace('.md', '') || filePath;
+					
+					// Hide timestamps if setting is enabled
+					if (this.plugin.settings.hideTimestampsInViews) {
+						fileName = this.plugin.removeTimestampFromFileName(fileName);
+					}
+					
+					// Create link to the note (without brackets)
+					const link = topLine.createEl('a', { 
+						text: fileName,
+						cls: 'internal-link',
+						href: filePath
 					});
+					
+					// Add click handler to open the note
+					link.onclick = (e) => {
+						e.preventDefault();
+						const file = this.app.vault.getAbstractFileByPath(filePath);
+						if (file && file instanceof TFile) {
+							this.app.workspace.openLinkText(filePath, '', false);
+						}
+					};
+					
+					// Total time tracked on the right
+					const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
+					topLine.createSpan({ text: timeText, cls: 'lapse-sidebar-time' });
+					
+					// Get project from frontmatter
+					const project = await this.plugin.getProjectFromFrontmatter(filePath);
+					
+					// Second line: project (if available)
+					if (project) {
+						const secondLine = item.createDiv({ cls: 'lapse-sidebar-second-line' });
+						secondLine.createSpan({ text: project, cls: 'lapse-sidebar-project' });
+					}
+					
+					// List individual entries below (only if toggled on)
+					if (this.showTodayEntries) {
+						const entriesList = item.createDiv({ cls: 'lapse-sidebar-entries-list' });
+						entries.forEach(({ entry }) => {
+							const entryLine = entriesList.createDiv({ cls: 'lapse-sidebar-entry-line' });
+							const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
+							entryLine.createSpan({ text: entry.label, cls: 'lapse-sidebar-entry-label' });
+							entryLine.createSpan({ text: entryTime, cls: 'lapse-sidebar-entry-time' });
+						});
+					}
 				}
 			}
 		}
 
-		// Add pie chart section at the bottom
-		await this.renderPieChart(container as HTMLElement, todayStart);
+		// Add pie chart section at the bottom (only if chart is visible)
+		if (this.showChart) {
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStart = today.getTime();
+			await this.renderPieChart(container as HTMLElement, todayStart);
+		}
 
 		// Set up refresh interval - always run to detect new timers
 		// Clear any existing interval first
@@ -2728,8 +2951,9 @@ class LapseSidebarView extends ItemView {
 		// Increment refresh counter
 		this.refreshCounter++;
 		
-		// Every 10 seconds (10 calls at 1 second interval), do a full refresh to catch metadata changes
-		if (this.refreshCounter >= 10) {
+		// Every 60 seconds (60 calls at 1 second interval), do a full refresh to catch metadata changes
+		// Reduced frequency to make it less distracting
+		if (this.refreshCounter >= 60) {
 			this.refreshCounter = 0;
 			// Clear cache for files that have active entries to reload fresh metadata
 			this.plugin.timeData.forEach((pageData, filePath) => {
@@ -3129,6 +3353,39 @@ class LapseSettingTab extends PluginSettingTab {
 					}
 				}));
 
+		// Activity View subsection
+		containerEl.createEl('h4', { text: 'Activity View' });
+
+		new Setting(containerEl)
+			.setName('Show note title')
+			.setDesc('Display the note title in active timer cards')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.activityShowNoteTitle)
+				.onChange(async (value) => {
+					this.plugin.settings.activityShowNoteTitle = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Show project')
+			.setDesc('Display the project name in active timer cards')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.activityShowProject)
+				.onChange(async (value) => {
+					this.plugin.settings.activityShowProject = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Show time entry label')
+			.setDesc('Display the entry label in active timer cards')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.activityShowEntryLabel)
+				.onChange(async (value) => {
+					this.plugin.settings.activityShowEntryLabel = value;
+					await this.plugin.saveSettings();
+				}));
+
 		new Setting(containerEl)
 			.setName('First day of week')
 			.setDesc('Set the first day of the week for weekly reports')
@@ -3223,6 +3480,104 @@ class LapseSettingTab extends PluginSettingTab {
 				ul.createEl('li', { text: '**/2020/** - 2020 folder at any depth' });
 				ul.createEl('li', { text: '**/Archive - Any folder ending in Archive' });
 			});
+
+		containerEl.createEl('h3', { text: 'Cache Management' });
+
+		// Cache info display
+		const cacheSize = Object.keys(this.plugin.entryCache).length;
+		const cacheInfoSetting = new Setting(containerEl)
+			.setName('Entry cache')
+			.setDesc(`Currently caching ${cacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
+
+		// Clear cache button
+		new Setting(containerEl)
+			.setName('Clear cache')
+			.setDesc('Delete all cached time entries. The cache will automatically rebuild as you use the plugin. Use this if you\'re experiencing issues or want to free up space.')
+			.addButton(button => button
+				.setButtonText('Clear Cache')
+				.setWarning()
+				.onClick(async () => {
+					// Confirm with user
+					const confirmed = confirm(
+						`Clear cache for ${cacheSize} files?\n\n` +
+						'This will delete all cached time entries. Your timer data in notes is safe. ' +
+						'The cache will rebuild automatically as you use the plugin.'
+					);
+					
+					if (confirmed) {
+						// Clear the cache
+						this.plugin.entryCache = {};
+						await this.plugin.saveSettings();
+						
+						// Update the cache info display
+						cacheInfoSetting.setDesc('Currently caching 0 files. The cache speeds up reports and activity views by storing time entry data.');
+						
+						// Show success message
+						button.setButtonText('Cache Cleared!');
+						setTimeout(() => {
+							button.setButtonText('Clear Cache');
+						}, 2000);
+					}
+				}));
+
+		// Rebuild cache button
+		new Setting(containerEl)
+			.setName('Rebuild cache')
+			.setDesc('Force a complete rebuild of the cache by scanning all markdown files in your vault. This may take a while for large vaults.')
+			.addButton(button => button
+				.setButtonText('Rebuild Cache')
+				.onClick(async () => {
+					button.setButtonText('Rebuilding...');
+					button.setDisabled(true);
+					
+					try {
+						// Clear existing cache
+						this.plugin.entryCache = {};
+						
+						// Scan all markdown files
+						const files = this.app.vault.getMarkdownFiles();
+						let processedCount = 0;
+						
+						for (const file of files) {
+							const filePath = file.path;
+							
+							// Skip excluded folders
+							if (this.plugin.isFileExcluded(filePath)) {
+								continue;
+							}
+							
+							// Load and cache entries
+							await this.plugin.getCachedOrLoadEntries(filePath);
+							processedCount++;
+							
+							// Update button text periodically
+							if (processedCount % 100 === 0) {
+								button.setButtonText(`Rebuilding... ${processedCount}/${files.length}`);
+							}
+						}
+						
+						// Save the rebuilt cache
+						await this.plugin.saveSettings();
+						
+						// Update cache info
+						const newCacheSize = Object.keys(this.plugin.entryCache).length;
+						cacheInfoSetting.setDesc(`Currently caching ${newCacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
+						
+						// Show success
+						button.setButtonText('Rebuild Complete!');
+						setTimeout(() => {
+							button.setButtonText('Rebuild Cache');
+							button.setDisabled(false);
+						}, 3000);
+					} catch (error) {
+						console.error('Lapse: Error rebuilding cache', error);
+						button.setButtonText('Rebuild Failed');
+						setTimeout(() => {
+							button.setButtonText('Rebuild Cache');
+							button.setDisabled(false);
+						}, 3000);
+					}
+				}));
 	}
 }
 
@@ -3234,6 +3589,10 @@ class LapseReportsView extends ItemView {
 	groupBy: 'note' | 'project' | 'date' | 'tag' = 'note';
 	secondaryGroupBy: 'none' | 'note' | 'project' | 'tag' | 'date' = 'none';
 	expandedGroups: Set<string> = new Set(); // Track which groups are expanded
+	chartType: 'bar' | 'pie' = 'pie'; // Chart type preference
+	
+	// Cache raw entries (only invalidate when date range changes)
+	cachedRawEntries: Array<{ filePath: string; entry: TimeEntry; project: string | null; noteName: string }> | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
 		super(leaf);
@@ -3279,6 +3638,7 @@ class LapseReportsView extends ItemView {
 		dateFilterSelect.value = this.dateFilter;
 		dateFilterSelect.onchange = async () => {
 			this.dateFilter = dateFilterSelect.value as 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth' | 'custom';
+			this.cachedRawEntries = null; // Invalidate raw entries cache when date range changes
 			await this.render();
 		};
 		
@@ -3293,7 +3653,8 @@ class LapseReportsView extends ItemView {
 		groupBySelect.value = this.groupBy;
 		groupBySelect.onchange = async () => {
 			this.groupBy = groupBySelect.value as 'note' | 'project' | 'date' | 'tag';
-			await this.render();
+			// Don't invalidate raw entries - just re-group and re-render
+			await this.renderTable();
 		};
 
 		// Secondary grouping
@@ -3308,7 +3669,8 @@ class LapseReportsView extends ItemView {
 		secondaryGroupBySelect.value = this.secondaryGroupBy;
 		secondaryGroupBySelect.onchange = async () => {
 			this.secondaryGroupBy = secondaryGroupBySelect.value as 'none' | 'note' | 'project' | 'tag' | 'date';
-			await this.render();
+			// Don't invalidate raw entries - just re-group and re-render
+			await this.renderTable();
 		};
 
 		// Custom date range picker (shown only when custom is selected)
@@ -3333,15 +3695,31 @@ class LapseReportsView extends ItemView {
 				text: 'Apply',
 				cls: 'lapse-apply-btn'
 			});
-			applyBtn.onclick = async () => {
-				this.customStartDate = startDateInput.value;
-				this.customEndDate = endDateInput.value;
-				await this.render();
-			};
-		}
+		applyBtn.onclick = async () => {
+			this.customStartDate = startDateInput.value;
+			this.customEndDate = endDateInput.value;
+			this.cachedRawEntries = null; // Invalidate raw entries cache when custom dates change
+			await this.render();
+		};
+	}
 
-		// Get data for the selected period
-		const data = await this.getReportData();
+	// Render the table
+	await this.renderTable();
+}
+
+async renderTable() {
+	const container = this.containerEl.children[1];
+	
+	// Remove only the data sections (keep the header/controls)
+	const existingSummary = container.querySelector('.lapse-reports-summary');
+	const existingTable = container.querySelector('.lapse-reports-table-container');
+	const existingChart = container.querySelector('.lapse-reports-chart-container');
+	if (existingSummary) existingSummary.remove();
+	if (existingTable) existingTable.remove();
+	if (existingChart) existingChart.remove();
+
+	// Get grouped data (will use cachedRawEntries if available)
+	const data = await this.getReportData();
 
 		// Summary section
 		const summary = container.createDiv({ cls: 'lapse-reports-summary' });
@@ -3356,10 +3734,20 @@ class LapseReportsView extends ItemView {
 		const headerRow = thead.createEl('tr');
 		headerRow.createEl('th', { text: '' }); // Expand/collapse column
 		headerRow.createEl('th', { text: this.getGroupByLabel() });
-		headerRow.createEl('th', { text: 'Project' });
+		
+		// Only show Project column if not already grouping by project
+		const showProjectColumn = this.groupBy !== 'project';
+		if (showProjectColumn) {
+			headerRow.createEl('th', { text: 'Project' });
+		}
+		
 		headerRow.createEl('th', { text: 'Tags' });
 		headerRow.createEl('th', { text: 'Time' });
-		headerRow.createEl('th', { text: 'Entries' });
+		// Last column shows entry count in collapsed view, and either entry labels or note names when expanded
+		// When grouping by note, expanded rows show entry labels, so header should say "Entries"
+		// When grouping by project/tag/date, expanded rows show note names, so header should say "Note"
+		const lastColumnHeader = this.groupBy === 'note' ? 'Entries' : 'Note';
+		headerRow.createEl('th', { text: lastColumnHeader });
 
 		const tbody = table.createEl('tbody');
 		
@@ -3377,71 +3765,134 @@ class LapseReportsView extends ItemView {
 			const isExpanded = this.expandedGroups.has(groupId);
 			setIcon(expandBtn, isExpanded ? 'chevron-down' : 'chevron-right');
 			
-			row.createEl('td', { text: item.group, cls: 'lapse-reports-group-name' });
+			// Group name cell - make it clickable if it's a note or project
+			const groupCell = row.createEl('td', { cls: 'lapse-reports-group-name' });
+			if (this.groupBy === 'note' && item.entries.length > 0) {
+				// When grouped by note, the group name is the note - make it a link
+				const link = groupCell.createEl('a', { 
+					text: item.group,
+					cls: 'lapse-reports-link'
+				});
+				link.onclick = async (e) => {
+					e.stopPropagation(); // Don't trigger row expand/collapse
+					const filePath = item.entries[0].filePath;
+					await this.plugin.app.workspace.openLinkText(filePath, '', true); // true = new tab
+				};
+			} else if (this.groupBy === 'project' && item.entries.length > 0) {
+				// When grouped by project, open the project note itself (the project name is the link target)
+				const link = groupCell.createEl('a', { 
+					text: item.group,
+					cls: 'lapse-reports-link'
+				});
+				link.onclick = async (e) => {
+					e.stopPropagation(); // Don't trigger row expand/collapse
+					// Use the project name directly as the link - Obsidian will resolve it
+					await this.plugin.app.workspace.openLinkText(item.group, '', true); // true = new tab
+				};
+			} else {
+				// For date/tag grouping, just show text
+				groupCell.setText(item.group);
+			}
 			
 			// Aggregate project/tags for group
 			const projects = new Set(item.entries.map(e => e.project).filter(p => p));
 			const allTags = new Set<string>();
 			item.entries.forEach(e => e.entry.tags?.forEach(t => allTags.add(t)));
 			
-			row.createEl('td', { text: projects.size > 0 ? Array.from(projects).join(', ') : '-' });
+			// Only show Project column if not grouping by project
+			if (showProjectColumn) {
+				row.createEl('td', { text: projects.size > 0 ? Array.from(projects).join(', ') : '-' });
+			}
+			
 			row.createEl('td', { text: allTags.size > 0 ? Array.from(allTags).map(t => `#${t}`).join(', ') : '-' });
 			row.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(item.totalTime) });
 			row.createEl('td', { text: item.entryCount.toString() });
 
-			// Click to expand/collapse
-			row.style.cursor = 'pointer';
-			row.onclick = () => {
-				if (this.expandedGroups.has(groupId)) {
-					this.expandedGroups.delete(groupId);
-				} else {
-					this.expandedGroups.add(groupId);
-				}
-				this.render();
-			};
+			// Create detail rows (initially hidden if not expanded)
+			const detailRows: HTMLElement[] = [];
 
 			// Show entries or subgroups if expanded
-			if (isExpanded) {
-				if (item.subGroups && item.subGroups.size > 0) {
-					// Show secondary grouping
-					for (const [subGroupName, subGroup] of item.subGroups) {
-						const subRow = tbody.createEl('tr', { cls: 'lapse-reports-subgroup-row' });
-						subRow.createEl('td'); // Empty expand cell
-						subRow.createEl('td', { text: `  ${subGroupName}`, cls: 'lapse-reports-subgroup-name' });
-						
-						const subProjects = new Set(subGroup.entries.map(e => e.project).filter(p => p));
-						const subTags = new Set<string>();
-						subGroup.entries.forEach(e => e.entry.tags?.forEach(t => subTags.add(t)));
-						
+			if (item.subGroups && item.subGroups.size > 0) {
+				// Show secondary grouping
+				for (const [subGroupName, subGroup] of item.subGroups) {
+					const subRow = tbody.createEl('tr', { cls: 'lapse-reports-subgroup-row' });
+					subRow.style.display = isExpanded ? '' : 'none';
+					subRow.createEl('td'); // Empty expand cell
+					subRow.createEl('td', { text: `  ${subGroupName}`, cls: 'lapse-reports-subgroup-name' });
+					
+					const subProjects = new Set(subGroup.entries.map(e => e.project).filter(p => p));
+					const subTags = new Set<string>();
+					subGroup.entries.forEach(e => e.entry.tags?.forEach(t => subTags.add(t)));
+					
+					// Only show Project column if not grouping by project
+					if (showProjectColumn) {
 						subRow.createEl('td', { text: subProjects.size > 0 ? Array.from(subProjects).join(', ') : '-' });
-						subRow.createEl('td', { text: subTags.size > 0 ? Array.from(subTags).map(t => `#${t}`).join(', ') : '-' });
-						subRow.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(subGroup.totalTime) });
-						subRow.createEl('td', { text: subGroup.entryCount.toString() });
 					}
-				} else {
-					// Show individual entries
-					for (const { entry, noteName, project } of item.entries) {
-						const entryRow = tbody.createEl('tr', { cls: 'lapse-reports-entry-row' });
-						entryRow.createEl('td'); // Empty expand cell
-						entryRow.createEl('td', { text: `  ${entry.label}`, cls: 'lapse-reports-entry-label' });
+					
+					subRow.createEl('td', { text: subTags.size > 0 ? Array.from(subTags).map(t => `#${t}`).join(', ') : '-' });
+					subRow.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(subGroup.totalTime) });
+					subRow.createEl('td', { text: subGroup.entryCount.toString() });
+					detailRows.push(subRow);
+				}
+			} else {
+				// Show individual entries
+				for (const { entry, noteName, project, filePath } of item.entries) {
+					const entryRow = tbody.createEl('tr', { cls: 'lapse-reports-entry-row' });
+					entryRow.style.display = isExpanded ? '' : 'none';
+					entryRow.createEl('td'); // Empty expand cell
+					entryRow.createEl('td', { text: `  ${entry.label}`, cls: 'lapse-reports-entry-label' });
+					
+					// Only show Project column if not grouping by project
+					if (showProjectColumn) {
 						entryRow.createEl('td', { text: project || '-' });
-						entryRow.createEl('td', { text: entry.tags && entry.tags.length > 0 ? entry.tags.map(t => `#${t}`).join(', ') : '-' });
-						
-						const entryDuration = entry.endTime 
-							? entry.duration 
-							: entry.duration + (Date.now() - entry.startTime!);
-						
-						entryRow.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(entryDuration) });
-						entryRow.createEl('td', { text: noteName, cls: 'lapse-reports-note-name' });
 					}
+					
+					entryRow.createEl('td', { text: entry.tags && entry.tags.length > 0 ? entry.tags.map(t => `#${t}`).join(', ') : '-' });
+					
+					const entryDuration = entry.endTime 
+						? entry.duration 
+						: entry.duration + (Date.now() - entry.startTime!);
+					
+					entryRow.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(entryDuration) });
+					
+					// Note name - make it a clickable link
+					const noteCell = entryRow.createEl('td', { cls: 'lapse-reports-note-name' });
+					const noteLink = noteCell.createEl('a', { 
+						text: noteName,
+						cls: 'lapse-reports-link'
+					});
+					noteLink.onclick = async (e) => {
+						e.stopPropagation();
+						await this.plugin.app.workspace.openLinkText(filePath, '', true); // true = new tab
+					};
+					
+					detailRows.push(entryRow);
 				}
 			}
+
+			// Click to expand/collapse (just toggle visibility, no re-render)
+			row.style.cursor = 'pointer';
+			row.onclick = () => {
+				const wasExpanded = this.expandedGroups.has(groupId);
+				if (wasExpanded) {
+					this.expandedGroups.delete(groupId);
+					setIcon(expandBtn, 'chevron-right');
+					// Hide detail rows
+					detailRows.forEach(r => r.style.display = 'none');
+				} else {
+					this.expandedGroups.add(groupId);
+					setIcon(expandBtn, 'chevron-down');
+					// Show detail rows
+					detailRows.forEach(r => r.style.display = '');
+				}
+			};
 		}
 
 		// Chart section
 		if (data.length > 0) {
 			const chartContainer = container.createDiv({ cls: 'lapse-reports-chart-container' });
-			await this.renderChart(chartContainer, data, totalTime);
+			// Pass sorted data to chart
+			await this.renderChart(chartContainer, sortedData, totalTime);
 		}
 	}
 
@@ -3507,6 +3958,23 @@ class LapseReportsView extends ItemView {
 			}>;
 		}>;
 	}>> {
+		// Get raw entries (cached or fresh)
+		let entries: Array<{ filePath: string; entry: TimeEntry; project: string | null; noteName: string }>;
+		
+		if (this.cachedRawEntries) {
+			// Use cached raw entries
+			entries = this.cachedRawEntries;
+		} else {
+			// Fetch raw entries and cache them
+			entries = await this.fetchRawEntries();
+			this.cachedRawEntries = entries;
+		}
+		
+		// Group the raw entries based on current groupBy/secondaryGroupBy settings
+		return this.groupEntries(entries);
+	}
+	
+	async fetchRawEntries(): Promise<Array<{ filePath: string; entry: TimeEntry; project: string | null; noteName: string }>> {
 		// Calculate date range based on date filter
 		const now = new Date();
 		let startDate: Date;
@@ -3591,7 +4059,31 @@ class LapseReportsView extends ItemView {
 				}
 			}
 		}
-
+		
+		return entries;
+	}
+	
+	groupEntries(entries: Array<{ filePath: string; entry: TimeEntry; project: string | null; noteName: string }>): Array<{ 
+		group: string; 
+		totalTime: number; 
+		entryCount: number;
+		entries: Array<{ 
+			entry: TimeEntry; 
+			filePath: string; 
+			project: string | null;
+			noteName: string;
+		}>;
+		subGroups?: Map<string, {
+			totalTime: number;
+			entryCount: number;
+			entries: Array<{ 
+				entry: TimeEntry; 
+				filePath: string; 
+				project: string | null;
+				noteName: string;
+			}>;
+		}>;
+	}> {
 		// Group entries hierarchically
 		const grouped = new Map<string, { 
 			totalTime: number; 
@@ -3657,7 +4149,44 @@ class LapseReportsView extends ItemView {
 
 	async renderChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number) {
 		container.empty();
-		container.createEl('h4', { text: 'Time Distribution' });
+		
+		// Header with chart type toggle buttons
+		const chartHeader = container.createDiv({ cls: 'lapse-chart-header' });
+		chartHeader.createEl('h4', { text: 'Time Distribution' });
+		
+		const chartTypeButtons = chartHeader.createDiv({ cls: 'lapse-chart-type-buttons' });
+		
+		// Bar chart button
+		const barBtn = chartTypeButtons.createEl('button', {
+			cls: `lapse-chart-type-btn ${this.chartType === 'bar' ? 'active' : ''}`,
+			attr: { 'aria-label': 'Bar chart' }
+		});
+		setIcon(barBtn, 'bar-chart');
+		barBtn.onclick = () => {
+			this.chartType = 'bar';
+			this.renderChart(container, data, totalTime);
+		};
+		
+		// Pie chart button
+		const pieBtn = chartTypeButtons.createEl('button', {
+			cls: `lapse-chart-type-btn ${this.chartType === 'pie' ? 'active' : ''}`,
+			attr: { 'aria-label': 'Pie chart' }
+		});
+		setIcon(pieBtn, 'pie-chart');
+		pieBtn.onclick = () => {
+			this.chartType = 'pie';
+			this.renderChart(container, data, totalTime);
+		};
+
+		// Render the selected chart type
+		if (this.chartType === 'bar') {
+			this.renderBarChart(container, data, totalTime);
+		} else {
+			this.renderPieChart(container, data, totalTime);
+		}
+	}
+
+	renderBarChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number) {
 
 		// Dimensions in viewBox coordinates
 		const viewBoxWidth = 1000; // Wide viewBox for proper aspect ratio
@@ -3736,9 +4265,83 @@ class LapseReportsView extends ItemView {
 				labelDiv.style.alignItems = 'center';
 			}
 			
-			labelDiv.textContent = item.group;
-			foreignObject.appendChild(labelDiv);
-			svg.appendChild(foreignObject);
-		});
-	}
+		labelDiv.textContent = item.group;
+		foreignObject.appendChild(labelDiv);
+		svg.appendChild(foreignObject);
+	});
+}
+
+renderPieChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number) {
+	// Create two-column layout: legend on left, pie on right
+	const pieContainer = container.createDiv({ cls: 'lapse-pie-chart-wrapper' });
+	
+	const colors = [
+		'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
+		'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C'
+	];
+
+	// Legend column (left side)
+	const legend = pieContainer.createDiv({ cls: 'lapse-chart-legend' });
+	data.forEach((item, index) => {
+		const legendItem = legend.createDiv({ cls: 'lapse-chart-legend-item' });
+		
+		const colorBox = legendItem.createEl('span', { cls: 'lapse-chart-legend-color' });
+		colorBox.style.backgroundColor = colors[index % colors.length];
+		
+		const label = legendItem.createEl('span', { cls: 'lapse-chart-legend-label' });
+		label.textContent = `${item.group}: ${this.plugin.formatTimeAsHHMMSS(item.totalTime)}`;
+	});
+
+	// Pie chart column (right side)
+	const svgContainer = pieContainer.createDiv({ cls: 'lapse-pie-chart-svg-container' });
+	
+	const size = 300;
+	const radius = 120;
+	const centerX = size / 2;
+	const centerY = size / 2;
+	
+	const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+	svg.setAttribute('class', 'lapse-reports-chart');
+	svg.setAttribute('width', '100%');
+	svg.setAttribute('height', '100%');
+	svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+	svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+	svgContainer.appendChild(svg);
+
+	// Calculate slices
+	let currentAngle = -90; // Start at top
+	data.forEach((item, index) => {
+		const percentage = totalTime > 0 ? (item.totalTime / totalTime) : 0;
+		const sliceAngle = percentage * 360;
+		
+		if (sliceAngle === 0) return;
+
+		// Calculate path for pie slice
+		const startAngle = (currentAngle * Math.PI) / 180;
+		const endAngle = ((currentAngle + sliceAngle) * Math.PI) / 180;
+		
+		const x1 = centerX + radius * Math.cos(startAngle);
+		const y1 = centerY + radius * Math.sin(startAngle);
+		const x2 = centerX + radius * Math.cos(endAngle);
+		const y2 = centerY + radius * Math.sin(endAngle);
+		
+		const largeArcFlag = sliceAngle > 180 ? 1 : 0;
+		
+		const pathData = [
+			`M ${centerX} ${centerY}`,
+			`L ${x1} ${y1}`,
+			`A ${radius} ${radius} 0 ${largeArcFlag} 1 ${x2} ${y2}`,
+			'Z'
+		].join(' ');
+		
+		const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+		path.setAttribute('d', pathData);
+		path.setAttribute('fill', colors[index % colors.length]);
+		path.setAttribute('stroke', 'var(--background-primary)');
+		path.setAttribute('stroke-width', '2');
+		svg.appendChild(path);
+		
+		currentAngle += sliceAngle;
+	});
+}
 }
