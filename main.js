@@ -50,19 +50,14 @@ var DEFAULT_SETTINGS = {
   // No folders excluded by default
   showStatusBar: true,
   // Show active timers in status bar by default
-<<<<<<< HEAD
-  lapseButtonTemplatesFolder: "Templates/Lapse Buttons"
+  lapseButtonTemplatesFolder: "Templates/Lapse Buttons",
   // Default folder for lapse button templates
-=======
   showDurationOnNoteButtons: false,
   // Don't show duration on note buttons by default
-  noteButtonDurationType: "timePeriod",
-  // Default to time period
-  noteButtonTimePeriod: "today",
-  // Default to today
-  noteButtonGroupBy: "note"
+  noteButtonDurationType: "note",
   // Default to note
->>>>>>> 57ec66d (in progress: settings updates)
+  noteButtonTimePeriod: "today"
+  // Default to today
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -102,20 +97,24 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     );
     this.registerMarkdownCodeBlockProcessor("lapse", this.processTimerCodeBlock.bind(this));
     this.registerMarkdownCodeBlockProcessor("lapse-report", this.processReportCodeBlock.bind(this));
-<<<<<<< HEAD
+    this.registerMarkdownCodeBlockProcessor("lapse-active", this.processActiveTimersCodeBlock.bind(this));
     this.registerMarkdownPostProcessor((el, ctx) => {
-      const codeElements = el.querySelectorAll("code");
+      const codeElements = el.querySelectorAll("code:not(pre code)");
       codeElements.forEach((codeEl) => {
-        const text = codeEl.textContent || "";
-        if (text.startsWith("lapse:")) {
-          const templateName = text.substring("lapse:".length);
-          this.processLapseButton(codeEl, templateName, ctx);
+        var _a;
+        if (codeEl instanceof HTMLElement) {
+          const text = codeEl.textContent || "";
+          if (text.startsWith("lapse:")) {
+            const templateName = text.substring("lapse:".length);
+            if (!((_a = codeEl.parentElement) == null ? void 0 : _a.classList.contains("lapse-button"))) {
+              this.processLapseButton(codeEl, templateName, ctx).catch((err) => {
+                console.error("Error processing lapse button:", err);
+              });
+            }
+          }
         }
       });
     });
-=======
-    this.registerMarkdownCodeBlockProcessor("lapse-active", this.processActiveTimersCodeBlock.bind(this));
->>>>>>> 57ec66d (in progress: settings updates)
     this.registerView(
       "lapse-sidebar",
       (leaf) => new LapseSidebarView(leaf, this)
@@ -640,80 +639,119 @@ ${content}`;
     return null;
   }
   async processLapseButton(codeEl, templateName, ctx) {
-    const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
-    const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
-    if (!templateFile || !(templateFile instanceof import_obsidian.TFile)) {
-      const errorBtn = document.createElement("button");
-      errorBtn.className = "lapse-button lapse-button-error";
-      errorBtn.textContent = `\u26A0\uFE0F Template not found: ${templateName}`;
-      errorBtn.title = `Looking for: ${templatePath}`;
-      errorBtn.disabled = true;
-      codeEl.replaceWith(errorBtn);
-      return;
-    }
-    let project = null;
     try {
-      const content = await this.app.vault.read(templateFile);
-      const frontmatterRegex = /---\n([\s\S]*?)\n---/;
-      const match = content.match(frontmatterRegex);
-      if (match) {
-        const frontmatter = match[1];
-        const lines = frontmatter.split("\n");
-        for (const line of lines) {
-          if (line.trim().startsWith(this.settings.projectKey + ":")) {
-            project = line.split(":").slice(1).join(":").trim();
-            if (project) {
-              project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
-              project = project.replace(/^["']+|["']+$/g, "");
-              project = project.trim();
+      const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
+      const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+      if (!templateFile || !(templateFile instanceof import_obsidian.TFile)) {
+        const errorBtn = document.createElement("button");
+        errorBtn.className = "lapse-button lapse-button-error";
+        errorBtn.textContent = `\u26A0\uFE0F Template not found: ${templateName}`;
+        errorBtn.title = `Looking for: ${templatePath}`;
+        errorBtn.disabled = true;
+        codeEl.replaceWith(errorBtn);
+        return;
+      }
+      let project = null;
+      try {
+        const content = await this.app.vault.read(templateFile);
+        const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+        const match = content.match(frontmatterRegex);
+        if (match) {
+          const frontmatter = match[1];
+          const lines = frontmatter.split("\n");
+          for (const line of lines) {
+            if (line.trim().startsWith(this.settings.projectKey + ":")) {
+              project = line.split(":").slice(1).join(":").trim();
+              if (project) {
+                project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
+                project = project.replace(/^["']+|["']+$/g, "");
+                project = project.trim();
+              }
+              break;
             }
-            break;
+          }
+        }
+      } catch (error) {
+        console.error("Error reading template:", error);
+      }
+      let projectColor = null;
+      if (project) {
+        projectColor = await this.getProjectColor(project);
+      }
+      const button = document.createElement("button");
+      button.className = "lapse-button";
+      const topLine = document.createElement("div");
+      topLine.className = "lapse-button-name";
+      topLine.style.display = "flex";
+      topLine.style.justifyContent = "flex-start";
+      topLine.style.alignItems = "center";
+      topLine.style.gap = "8px";
+      topLine.style.minWidth = "0";
+      const titleEl = document.createElement("span");
+      titleEl.className = "lapse-button-title";
+      titleEl.textContent = templateName;
+      titleEl.style.overflow = "hidden";
+      titleEl.style.textOverflow = "ellipsis";
+      titleEl.style.whiteSpace = "nowrap";
+      titleEl.style.flex = "1";
+      titleEl.style.minWidth = "0";
+      topLine.appendChild(titleEl);
+      if (this.settings.showDurationOnNoteButtons) {
+        try {
+          const duration = await this.getTemplateButtonDuration(templateName, project);
+          if (duration > 0) {
+            const durationText = this.formatTimeForButton(duration);
+            const durationEl = document.createElement("span");
+            durationEl.className = "lapse-button-duration";
+            durationEl.textContent = durationText;
+            durationEl.style.flexShrink = "0";
+            durationEl.style.marginLeft = "auto";
+            topLine.appendChild(durationEl);
+          }
+        } catch (error) {
+          console.error("Error calculating duration:", error);
+        }
+      }
+      button.appendChild(topLine);
+      if (project) {
+        const bottomLine = document.createElement("div");
+        bottomLine.className = "lapse-button-project";
+        bottomLine.textContent = project;
+        button.appendChild(bottomLine);
+      }
+      if (projectColor) {
+        button.style.borderLeftColor = projectColor;
+        if (project) {
+          const bottomLine = button.querySelector(".lapse-button-project");
+          if (bottomLine) {
+            bottomLine.style.backgroundColor = projectColor;
+            const contrastColor = this.getContrastColor(projectColor);
+            bottomLine.style.color = contrastColor;
           }
         }
       }
-    } catch (error) {
-      console.error("Error reading template:", error);
-    }
-    let projectColor = null;
-    if (project) {
-      projectColor = await this.getProjectColor(project);
-    }
-    const button = document.createElement("button");
-    button.className = "lapse-button";
-    const topLine = document.createElement("div");
-    topLine.className = "lapse-button-name";
-    topLine.textContent = templateName;
-    button.appendChild(topLine);
-    if (project) {
-      const bottomLine = document.createElement("div");
-      bottomLine.className = "lapse-button-project";
-      bottomLine.textContent = project;
-      button.appendChild(bottomLine);
-    }
-    if (projectColor) {
-      button.style.borderLeftColor = projectColor;
-      if (project) {
-        const bottomLine = button.querySelector(".lapse-button-project");
-        if (bottomLine) {
-          bottomLine.style.backgroundColor = projectColor;
-          const contrastColor = this.getContrastColor(projectColor);
-          bottomLine.style.color = contrastColor;
+      button.onclick = async () => {
+        try {
+          const templateContent = await this.app.vault.read(templateFile);
+          const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
+          const newNoteName = `${templateName} ${timestamp}`;
+          const newNotePath = `${newNoteName}.md`;
+          const newFile = await this.app.vault.create(newNotePath, templateContent);
+          await this.app.workspace.getLeaf(false).openFile(newFile);
+        } catch (error) {
+          console.error("Error creating note from template:", error);
         }
-      }
+      };
+      codeEl.replaceWith(button);
+    } catch (error) {
+      console.error("Error processing lapse button:", error);
+      const errorBtn = document.createElement("button");
+      errorBtn.className = "lapse-button lapse-button-error";
+      errorBtn.textContent = `\u26A0\uFE0F Error: ${templateName}`;
+      errorBtn.title = `Error processing button: ${error}`;
+      errorBtn.disabled = true;
+      codeEl.replaceWith(errorBtn);
     }
-    button.onclick = async () => {
-      try {
-        const templateContent = await this.app.vault.read(templateFile);
-        const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5);
-        const newNoteName = `${templateName} ${timestamp}`;
-        const newNotePath = `${newNoteName}.md`;
-        const newFile = await this.app.vault.create(newNotePath, templateContent);
-        await this.app.workspace.getLeaf(false).openFile(newFile);
-      } catch (error) {
-        console.error("Error creating note from template:", error);
-      }
-    };
-    codeEl.replaceWith(button);
   }
   // Helper to get contrasting text color for a background color
   getContrastColor(hexColor) {
@@ -1031,6 +1069,13 @@ ${content}`;
     };
   }
   async processReportCodeBlock(source, el, ctx) {
+    const container = el.createDiv({ cls: "lapse-report-container" });
+    const loadingContainer = container.createDiv({ cls: "lapse-report-loading" });
+    const loadingText = loadingContainer.createDiv({ cls: "lapse-report-loading-text" });
+    loadingText.setText("Loading Lapse Report");
+    const spinnerContainer = loadingContainer.createDiv({ cls: "lapse-report-loading-spinner" });
+    const spinner = spinnerContainer.createEl("span", { cls: "lapse-spinner-icon" });
+    (0, import_obsidian.setIcon)(spinner, "loader-2");
     const query = this.parseQuery(source);
     console.log("Lapse Report Query:", query);
     const { startTime, endTime } = this.getDateRange(query);
@@ -1042,7 +1087,7 @@ ${content}`;
     console.log("Matched Entries:", matchedEntries.length);
     const groupedData = this.groupEntries(matchedEntries, query.groupBy || "project");
     console.log("Grouped Data:", groupedData.size, "groups");
-    const container = el.createDiv({ cls: "lapse-report-container" });
+    container.empty();
     if (query.display === "summary") {
       await this.renderReportSummary(container, groupedData, query);
     } else if (query.display === "chart") {
@@ -1053,8 +1098,9 @@ ${content}`;
   }
   async processActiveTimersCodeBlock(source, el, ctx) {
     const container = el.createDiv({ cls: "lapse-active-container" });
-    const renderActiveTimers = async () => {
-      container.empty();
+    const timeDisplays = /* @__PURE__ */ new Map();
+    const updateIntervals = /* @__PURE__ */ new Map();
+    const getActiveTimers = async () => {
       const activeTimers = [];
       const currentFile = this.app.workspace.getActiveFile();
       if (currentFile) {
@@ -1095,6 +1141,14 @@ ${content}`;
           }
         });
       }
+      return activeTimers;
+    };
+    const renderActiveTimers = async () => {
+      updateIntervals.forEach((intervalId) => window.clearInterval(intervalId));
+      updateIntervals.clear();
+      timeDisplays.clear();
+      container.empty();
+      const activeTimers = await getActiveTimers();
       if (activeTimers.length === 0) {
         container.createEl("p", { text: "No active timers", cls: "lapse-active-empty" });
         return;
@@ -1107,6 +1161,7 @@ ${content}`;
           text: timeText,
           cls: "lapse-active-time"
         });
+        timeDisplays.set(entry.id, timeDisplay);
         const labelDisplay = row.createDiv({
           text: entry.label,
           cls: "lapse-active-label"
@@ -1136,20 +1191,47 @@ ${content}`;
         const intervalId = window.setInterval(() => {
           if (entry.startTime && !entry.endTime) {
             const newElapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
-            timeDisplay.setText(this.formatTimeAsHHMMSS(newElapsed));
+            const display = timeDisplays.get(entry.id);
+            if (display) {
+              display.setText(this.formatTimeAsHHMMSS(newElapsed));
+            }
           } else {
             window.clearInterval(intervalId);
+            updateIntervals.delete(entry.id);
           }
         }, 1e3);
+        updateIntervals.set(entry.id, intervalId);
+      }
+    };
+    const updateTimers = async () => {
+      const activeTimers = await getActiveTimers();
+      const activeEntryIds = new Set(activeTimers.map(({ entry }) => entry.id));
+      const displayedEntryIds = new Set(timeDisplays.keys());
+      const needsFullRefresh = activeTimers.length !== displayedEntryIds.size || ![...displayedEntryIds].every((id) => activeEntryIds.has(id)) || !activeTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
+      if (needsFullRefresh) {
+        await renderActiveTimers();
+        return;
+      }
+      for (const { entry } of activeTimers) {
+        const timeDisplay = timeDisplays.get(entry.id);
+        if (timeDisplay && entry.startTime && !entry.endTime) {
+          const elapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
+          timeDisplay.setText(this.formatTimeAsHHMMSS(elapsed));
+        }
       }
     };
     await renderActiveTimers();
+    const updateInterval = window.setInterval(() => {
+      updateTimers().catch((err) => console.error("Error updating active timers:", err));
+    }, 1e3);
     const refreshInterval = window.setInterval(async () => {
-      await renderActiveTimers();
-    }, 5e3);
+      await updateTimers();
+    }, 3e4);
     ctx.addChild({
       unload: () => {
+        window.clearInterval(updateInterval);
         window.clearInterval(refreshInterval);
+        updateIntervals.forEach((intervalId) => window.clearInterval(intervalId));
       }
     });
   }
@@ -1336,64 +1418,168 @@ ${content}`;
     return { startTime: startDate.getTime(), endTime: endDate.getTime() };
   }
   /**
-   * Calculate duration for a note based on settings
+   * Calculate duration for a template button based on settings
+   * Always aggregates across multiple notes based on the duration type
    */
-  async getNoteButtonDuration(filePath) {
+  async getTemplateButtonDuration(templateName, templateProject) {
     if (!this.settings.showDurationOnNoteButtons) {
       return 0;
     }
-    if (this.settings.noteButtonDurationType === "timePeriod") {
-      const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
-      const { entries } = await this.getCachedOrLoadEntries(filePath);
-      let totalDuration = 0;
-      for (const entry of entries) {
-        if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
-          const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
-          totalDuration += entryDuration;
-        }
+    const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+    let totalDuration = 0;
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    if (this.settings.noteButtonDurationType === "project") {
+      if (!templateProject) {
+        return 0;
       }
-      return totalDuration;
-    } else {
-      const defaultNoteName = this.getDefaultNoteName(filePath);
-      const project = await this.getProjectFromFrontmatter(filePath);
-      const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
-      let totalDuration = 0;
-      const markdownFiles = this.app.vault.getMarkdownFiles();
       for (const file of markdownFiles) {
         const currentFilePath = file.path;
         if (this.isFileExcluded(currentFilePath)) {
           continue;
         }
-        if (this.settings.noteButtonGroupBy === "project") {
-          const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
-          if (currentProject === project && project) {
-            const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+        const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
+        if (currentProject === templateProject) {
+          const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+          if (entries.length > 0) {
             for (const entry of entries) {
-              if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
-                const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
-                totalDuration += entryDuration;
-              }
-            }
-          }
-        } else {
-          const currentDefaultName = this.getDefaultNoteName(currentFilePath);
-          if (currentDefaultName === defaultNoteName) {
-            const currentFileName = file.basename;
-            const currentNameWithoutTimestamp = this.removeTimestampFromFileName(currentFileName);
-            if (currentNameWithoutTimestamp === defaultNoteName) {
-              const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
-              for (const entry of entries) {
-                if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
-                  const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
-                  totalDuration += entryDuration;
+              if (entry.startTime) {
+                const entryStart = entry.startTime;
+                const entryEnd = entry.endTime || Date.now();
+                if (entryStart <= endTime && entryEnd >= startTime) {
+                  const periodStart = Math.max(entryStart, startTime);
+                  const periodEnd = Math.min(entryEnd, endTime);
+                  if (entry.endTime) {
+                    const entryTotalDuration = entryEnd - entryStart;
+                    if (entryTotalDuration > 0) {
+                      const periodDuration = periodEnd - periodStart;
+                      const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+                      totalDuration += scaledDuration;
+                    }
+                  } else {
+                    totalDuration += periodEnd - periodStart;
+                  }
                 }
               }
             }
           }
         }
       }
-      return totalDuration;
+    } else {
+      for (const file of markdownFiles) {
+        const currentFilePath = file.path;
+        if (this.isFileExcluded(currentFilePath)) {
+          continue;
+        }
+        const currentBaseName = this.getDefaultNoteName(currentFilePath);
+        if (currentBaseName === templateName) {
+          const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+          for (const entry of entries) {
+            if (entry.startTime) {
+              const entryStart = entry.startTime;
+              const entryEnd = entry.endTime || Date.now();
+              if (entryStart <= endTime && entryEnd >= startTime) {
+                const periodStart = Math.max(entryStart, startTime);
+                const periodEnd = Math.min(entryEnd, endTime);
+                if (entry.endTime) {
+                  const entryTotalDuration = entryEnd - entryStart;
+                  if (entryTotalDuration > 0) {
+                    const periodDuration = periodEnd - periodStart;
+                    const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+                    totalDuration += scaledDuration;
+                  }
+                } else {
+                  totalDuration += periodEnd - periodStart;
+                }
+              }
+            }
+          }
+        }
+      }
     }
+    return totalDuration;
+  }
+  /**
+   * Calculate duration for a note based on settings
+   * Always aggregates across multiple notes based on the duration type
+   */
+  async getNoteButtonDuration(filePath) {
+    if (!this.settings.showDurationOnNoteButtons) {
+      return 0;
+    }
+    const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+    let totalDuration = 0;
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    if (this.settings.noteButtonDurationType === "project") {
+      const project = await this.getProjectFromFrontmatter(filePath);
+      if (!project) {
+        return 0;
+      }
+      for (const file of markdownFiles) {
+        const currentFilePath = file.path;
+        if (this.isFileExcluded(currentFilePath)) {
+          continue;
+        }
+        const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
+        if (currentProject === project) {
+          const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+          if (entries.length > 0) {
+            for (const entry of entries) {
+              if (entry.startTime) {
+                const entryStart = entry.startTime;
+                const entryEnd = entry.endTime || Date.now();
+                if (entryStart <= endTime && entryEnd >= startTime) {
+                  const periodStart = Math.max(entryStart, startTime);
+                  const periodEnd = Math.min(entryEnd, endTime);
+                  if (entry.endTime) {
+                    const entryTotalDuration = entryEnd - entryStart;
+                    if (entryTotalDuration > 0) {
+                      const periodDuration = periodEnd - periodStart;
+                      const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+                      totalDuration += scaledDuration;
+                    }
+                  } else {
+                    totalDuration += periodEnd - periodStart;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      const baseNoteName = this.getDefaultNoteName(filePath);
+      for (const file of markdownFiles) {
+        const currentFilePath = file.path;
+        if (this.isFileExcluded(currentFilePath)) {
+          continue;
+        }
+        const currentBaseName = this.getDefaultNoteName(currentFilePath);
+        if (currentBaseName === baseNoteName) {
+          const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+          for (const entry of entries) {
+            if (entry.startTime) {
+              const entryStart = entry.startTime;
+              const entryEnd = entry.endTime || Date.now();
+              if (entryStart <= endTime && entryEnd >= startTime) {
+                const periodStart = Math.max(entryStart, startTime);
+                const periodEnd = Math.min(entryEnd, endTime);
+                if (entry.endTime) {
+                  const entryTotalDuration = entryEnd - entryStart;
+                  if (entryTotalDuration > 0) {
+                    const periodDuration = periodEnd - periodStart;
+                    const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+                    totalDuration += scaledDuration;
+                  }
+                } else {
+                  totalDuration += periodEnd - periodStart;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return totalDuration;
   }
   async getMatchingEntries(query, startTime, endTime) {
     const matchedEntries = [];
@@ -1949,6 +2135,17 @@ ${content}`;
     const seconds = totalSeconds % 60;
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
+  formatTimeForButton(milliseconds) {
+    const totalSeconds = Math.floor(milliseconds / 1e3);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor(totalSeconds % 3600 / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    } else {
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    }
+  }
   formatTimeForTimerDisplay(milliseconds) {
     const totalSeconds = Math.floor(milliseconds / 1e3);
     const hours = Math.floor(totalSeconds / 3600);
@@ -2315,13 +2512,6 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
             this.app.workspace.openLinkText(filePath, "", false);
           }
         };
-        if (this.plugin.settings.showDurationOnNoteButtons) {
-          const duration = await this.plugin.getNoteButtonDuration(filePath);
-          if (duration > 0) {
-            const durationText = this.plugin.formatTimeAsHHMMSS(duration);
-            link.setText(`${fileName} (${durationText})`);
-          }
-        }
         const project = await this.plugin.getProjectFromFrontmatter(filePath);
         if (project) {
           detailsContainer.createDiv({ text: project, cls: "lapse-activity-project" });
@@ -2406,13 +2596,6 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
               this.app.workspace.openLinkText(filePath, "", false);
             }
           };
-          if (this.plugin.settings.showDurationOnNoteButtons) {
-            const duration = await this.plugin.getNoteButtonDuration(filePath);
-            if (duration > 0) {
-              const durationText = this.plugin.formatTimeAsHHMMSS(duration);
-              link.setText(`${fileName} (${durationText})`);
-            }
-          }
           const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
           topLine.createSpan({ text: timeText, cls: "lapse-sidebar-time" });
           const project = await this.plugin.getProjectFromFrontmatter(filePath);
@@ -2447,7 +2630,7 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
   }
   async updateTimers() {
     this.refreshCounter++;
-    if (this.refreshCounter >= 10) {
+    if (this.refreshCounter >= 30) {
       this.refreshCounter = 0;
       this.plugin.timeData.forEach((pageData, filePath) => {
         this.plugin.invalidateCacheForFile(filePath);
@@ -2465,22 +2648,21 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     });
     const displayedEntryIds = new Set(this.timeDisplays.keys());
     const activeEntryIds = new Set(currentActiveTimers.map(({ entry }) => entry.id));
-    if (currentActiveTimers.length !== displayedEntryIds.size || ![...displayedEntryIds].every((id) => activeEntryIds.has(id))) {
+    const needsFullRefresh = currentActiveTimers.length !== displayedEntryIds.size || ![...displayedEntryIds].every((id) => activeEntryIds.has(id)) || !currentActiveTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
+    if (needsFullRefresh) {
       await this.render();
       return;
     }
-    this.timeDisplays.forEach((timeDisplay, entryId) => {
+    for (const [entryId, timeDisplay] of this.timeDisplays.entries()) {
       let foundEntry = null;
-      let found = false;
       for (const [filePath, pageData] of this.plugin.timeData) {
         for (const entry of pageData.entries) {
           if (entry.id === entryId && entry.startTime && !entry.endTime) {
             foundEntry = entry;
-            found = true;
             break;
           }
         }
-        if (found)
+        if (foundEntry)
           break;
       }
       if (foundEntry && foundEntry.startTime) {
@@ -2489,8 +2671,18 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
         timeDisplay.setText(timeText);
       } else {
         this.timeDisplays.delete(entryId);
+        await this.render();
+        return;
       }
-    });
+    }
+    if (this.showChart && this.refreshCounter % 5 === 0) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStart = today.getTime();
+      const chartContainer = this.containerEl.querySelector(".lapse-pie-chart-container");
+      if (chartContainer) {
+      }
+    }
   }
   async renderPieChart(container, todayStart) {
     const projectTimes = /* @__PURE__ */ new Map();
@@ -2650,6 +2842,15 @@ var LapseButtonsView = class extends import_obsidian.ItemView {
     container.addClass("lapse-buttons-view");
     const header = container.createDiv({ cls: "lapse-buttons-header" });
     header.createEl("h2", { text: "Quick Start" });
+    const headerButtons = header.createDiv({ cls: "lapse-buttons-header-buttons" });
+    const refreshBtn = headerButtons.createEl("button", {
+      cls: "lapse-buttons-refresh-btn clickable-icon",
+      attr: { "aria-label": "Refresh" }
+    });
+    (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
+    refreshBtn.onclick = async () => {
+      await this.render();
+    };
     const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
     const files = this.app.vault.getMarkdownFiles();
     const templates = files.filter((file) => file.path.startsWith(templateFolder + "/"));
@@ -2735,8 +2936,34 @@ var LapseButtonsView = class extends import_obsidian.ItemView {
       const buttonsGrid = projectSection.createDiv({ cls: "lapse-buttons-grid" });
       for (const data of projectTemplates) {
         const button = buttonsGrid.createEl("button", { cls: "lapse-button" });
-        const titleEl = button.createDiv({ cls: "lapse-button-name" });
+        const topLine = button.createDiv({ cls: "lapse-button-name" });
+        topLine.style.display = "flex";
+        topLine.style.justifyContent = "flex-start";
+        topLine.style.alignItems = "center";
+        topLine.style.gap = "8px";
+        topLine.style.minWidth = "0";
+        const titleEl = topLine.createSpan({ cls: "lapse-button-title" });
         titleEl.textContent = data.templateName;
+        titleEl.style.overflow = "hidden";
+        titleEl.style.textOverflow = "ellipsis";
+        titleEl.style.whiteSpace = "nowrap";
+        titleEl.style.flex = "1";
+        titleEl.style.minWidth = "0";
+        titleEl.style.textAlign = "left";
+        if (this.plugin.settings.showDurationOnNoteButtons) {
+          try {
+            const duration = await this.plugin.getTemplateButtonDuration(data.templateName, data.project);
+            if (duration > 0) {
+              const durationText = this.plugin.formatTimeForButton(duration);
+              const durationEl = topLine.createSpan({ cls: "lapse-button-duration" });
+              durationEl.textContent = durationText;
+              durationEl.style.flexShrink = "0";
+              durationEl.style.marginLeft = "auto";
+            }
+          } catch (error) {
+            console.error("Error calculating duration for Quick Start button:", error);
+          }
+        }
         if (data.project) {
           const projectEl = button.createDiv({ cls: "lapse-button-project" });
           projectEl.textContent = data.project;
@@ -2880,7 +3107,7 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       }
     }));
-    new import_obsidian.Setting(containerEl).setName("Show duration on note buttons").setDesc("Display task duration on note links in the Activity sidebar").addToggle((toggle) => toggle.setValue(this.plugin.settings.showDurationOnNoteButtons).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("Show duration on note buttons").setDesc("Display task duration on inline lapse buttons (e.g., `lapse:Dishes`)").addToggle((toggle) => toggle.setValue(this.plugin.settings.showDurationOnNoteButtons).onChange(async (value) => {
       this.plugin.settings.showDurationOnNoteButtons = value;
       await this.plugin.saveSettings();
       this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
@@ -2890,7 +3117,7 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       });
     }));
     if (this.plugin.settings.showDurationOnNoteButtons) {
-      new import_obsidian.Setting(containerEl).setName("Duration type").setDesc("Choose how to calculate duration: time period or project/note aggregate").addDropdown((dropdown) => dropdown.addOption("timePeriod", "Time Period").addOption("projectOrNote", "Project or Note").setValue(this.plugin.settings.noteButtonDurationType).onChange(async (value) => {
+      new import_obsidian.Setting(containerEl).setName("Duration type").setDesc("Project: aggregate time from all notes with the same project. Note: aggregate time from all notes with the same base filename (ignoring timestamp).").addDropdown((dropdown) => dropdown.addOption("project", "Project").addOption("note", "Note").setValue(this.plugin.settings.noteButtonDurationType).onChange(async (value) => {
         this.plugin.settings.noteButtonDurationType = value;
         await this.plugin.saveSettings();
         this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
@@ -2908,17 +3135,6 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
           }
         });
       }));
-      if (this.plugin.settings.noteButtonDurationType === "projectOrNote") {
-        new import_obsidian.Setting(containerEl).setName("Group by").setDesc("Show aggregate time for project (all notes with same project) or note (all notes with same default name)").addDropdown((dropdown) => dropdown.addOption("project", "Project").addOption("note", "Note").setValue(this.plugin.settings.noteButtonGroupBy).onChange(async (value) => {
-          this.plugin.settings.noteButtonGroupBy = value;
-          await this.plugin.saveSettings();
-          this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
-            if (leaf.view instanceof LapseSidebarView) {
-              leaf.view.refresh();
-            }
-          });
-        }));
-      }
     }
     new import_obsidian.Setting(containerEl).setName("First day of week").setDesc("Set the first day of the week for weekly reports").addDropdown((dropdown) => dropdown.addOption("0", "Sunday").addOption("1", "Monday").addOption("2", "Tuesday").addOption("3", "Wednesday").addOption("4", "Thursday").addOption("5", "Friday").addOption("6", "Saturday").setValue(this.plugin.settings.firstDayOfWeek.toString()).onChange(async (value) => {
       this.plugin.settings.firstDayOfWeek = parseInt(value);
@@ -2966,60 +3182,15 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       ul.createEl("li", { text: "**/2020/** - 2020 folder at any depth" });
       ul.createEl("li", { text: "**/Archive - Any folder ending in Archive" });
     });
-    containerEl.createEl("h3", { text: "Cache Management" });
-    const cacheSize = Object.keys(this.plugin.entryCache).length;
-    const cacheInfoSetting = new import_obsidian.Setting(containerEl).setName("Entry cache").setDesc(`Currently caching ${cacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
-    new import_obsidian.Setting(containerEl).setName("Clear cache").setDesc("Delete all cached time entries. The cache will automatically rebuild as you use the plugin. Use this if you're experiencing issues or want to free up space.").addButton((button) => button.setButtonText("Clear Cache").setWarning().onClick(async () => {
-      const confirmed = confirm(
-        `Clear cache for ${cacheSize} files?
-
-This will delete all cached time entries. Your timer data in notes is safe. The cache will rebuild automatically as you use the plugin.`
-      );
-      if (confirmed) {
-        this.plugin.entryCache = {};
-        await this.plugin.saveSettings();
-        cacheInfoSetting.setDesc("Currently caching 0 files. The cache speeds up reports and activity views by storing time entry data.");
-        button.setButtonText("Cache Cleared!");
-        setTimeout(() => {
-          button.setButtonText("Clear Cache");
-        }, 2e3);
-      }
-    }));
-    new import_obsidian.Setting(containerEl).setName("Rebuild cache").setDesc("Force a complete rebuild of the cache by scanning all markdown files in your vault. This may take a while for large vaults.").addButton((button) => button.setButtonText("Rebuild Cache").onClick(async () => {
-      button.setButtonText("Rebuilding...");
-      button.setDisabled(true);
-      try {
-        this.plugin.entryCache = {};
-        const files = this.app.vault.getMarkdownFiles();
-        let processedCount = 0;
-        for (const file of files) {
-          const filePath = file.path;
-          if (this.plugin.isFileExcluded(filePath)) {
-            continue;
-          }
-          await this.plugin.getCachedOrLoadEntries(filePath);
-          processedCount++;
-          if (processedCount % 100 === 0) {
-            button.setButtonText(`Rebuilding... ${processedCount}/${files.length}`);
-          }
-        }
-        await this.plugin.saveSettings();
-        const newCacheSize = Object.keys(this.plugin.entryCache).length;
-        cacheInfoSetting.setDesc(`Currently caching ${newCacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
-        button.setButtonText("Rebuild Complete!");
-        setTimeout(() => {
-          button.setButtonText("Rebuild Cache");
-          button.setDisabled(false);
-        }, 3e3);
-      } catch (error) {
-        console.error("Lapse: Error rebuilding cache", error);
-        button.setButtonText("Rebuild Failed");
-        setTimeout(() => {
-          button.setButtonText("Rebuild Cache");
-          button.setDisabled(false);
-        }, 3e3);
-      }
-    }));
+    containerEl.createEl("hr", { cls: "lapse-settings-divider" });
+    const githubLinkContainer = containerEl.createDiv({ cls: "lapse-settings-footer" });
+    const githubLink = githubLinkContainer.createEl("a", {
+      text: "Report an issue on GitHub",
+      href: "https://github.com/jimmy-little/obsidian-lapse-tracker/issues/new",
+      cls: "lapse-github-link"
+    });
+    githubLink.setAttr("target", "_blank");
+    githubLink.setAttr("rel", "noopener noreferrer");
   }
 };
 var LapseReportsView = class extends import_obsidian.ItemView {

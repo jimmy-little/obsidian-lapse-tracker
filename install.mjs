@@ -2,7 +2,7 @@ import { mkdir, copyFile } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 
-const VAULT_PATH = '/Users/Jimmy.Little/Library/Mobile Documents/iCloud~md~obsidian/Documents/JimmyOS';
+const VAULT_PATH = '/Users/jimmy/Library/Mobile Documents/iCloud~md~obsidian/Documents/JimmyOS';
 const PLUGIN_DIR = join(VAULT_PATH, '.obsidian', 'plugins', 'lapse-tracker');
 const PROJECT_DIR = process.cwd();
 

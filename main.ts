@@ -19,14 +19,10 @@ interface LapseSettings {
 	firstDayOfWeek: number; // 0 = Sunday, 1 = Monday, etc.
 	excludedFolders: string[]; // Glob patterns for folders to exclude
 	showStatusBar: boolean; // Show active timer(s) in status bar
-<<<<<<< HEAD
 	lapseButtonTemplatesFolder: string; // Folder containing templates for lapse-button inline buttons
-=======
 	showDurationOnNoteButtons: boolean; // Show duration on note buttons/links
-	noteButtonDurationType: 'timePeriod' | 'projectOrNote'; // Type of duration to show
+	noteButtonDurationType: 'project' | 'note'; // Type of duration to show (project or note)
 	noteButtonTimePeriod: 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth'; // Time period for duration
-	noteButtonGroupBy: 'project' | 'note'; // Group by project or note
->>>>>>> 57ec66d (in progress: settings updates)
 }
 
 const DEFAULT_SETTINGS: LapseSettings = {
@@ -48,14 +44,10 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	firstDayOfWeek: 0, // 0 = Sunday
 	excludedFolders: [], // No folders excluded by default
 	showStatusBar: true, // Show active timers in status bar by default
-<<<<<<< HEAD
-	lapseButtonTemplatesFolder: 'Templates/Lapse Buttons' // Default folder for lapse button templates
-=======
+	lapseButtonTemplatesFolder: 'Templates/Lapse Buttons', // Default folder for lapse button templates
 	showDurationOnNoteButtons: false, // Don't show duration on note buttons by default
-	noteButtonDurationType: 'timePeriod', // Default to time period
-	noteButtonTimePeriod: 'today', // Default to today
-	noteButtonGroupBy: 'note' // Default to note
->>>>>>> 57ec66d (in progress: settings updates)
+	noteButtonDurationType: 'note', // Default to note
+	noteButtonTimePeriod: 'today' // Default to today
 }
 
 interface TimeEntry {
@@ -142,12 +134,20 @@ export default class LapsePlugin extends Plugin {
 
 		// Register inline code processor for lapse template buttons
 		this.registerMarkdownPostProcessor((el, ctx) => {
-			const codeElements = el.querySelectorAll('code');
+			// Find all code elements that are not inside code blocks
+			const codeElements = el.querySelectorAll('code:not(pre code)');
 			codeElements.forEach((codeEl) => {
-				const text = codeEl.textContent || '';
-				if (text.startsWith('lapse:')) {
-					const templateName = text.substring('lapse:'.length);
-					this.processLapseButton(codeEl, templateName, ctx);
+				if (codeEl instanceof HTMLElement) {
+					const text = codeEl.textContent || '';
+					if (text.startsWith('lapse:')) {
+						const templateName = text.substring('lapse:'.length);
+						// Only process if not already processed (check if parent is a button)
+						if (!codeEl.parentElement?.classList.contains('lapse-button')) {
+							this.processLapseButton(codeEl, templateName, ctx).catch(err => {
+								console.error('Error processing lapse button:', err);
+							});
+						}
+					}
 				}
 			});
 		});
@@ -858,119 +858,163 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async processLapseButton(codeEl: HTMLElement, templateName: string, ctx: MarkdownPostProcessorContext) {
-		// Find the template file
-		const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
-		const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
-		
-		if (!templateFile || !(templateFile instanceof TFile)) {
-			// Template not found - show error
+		try {
+			// Find the template file
+			const templatePath = `${this.settings.lapseButtonTemplatesFolder}/${templateName}.md`;
+			const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+			
+			if (!templateFile || !(templateFile instanceof TFile)) {
+				// Template not found - show error
+				const errorBtn = document.createElement('button');
+				errorBtn.className = 'lapse-button lapse-button-error';
+				errorBtn.textContent = `⚠️ Template not found: ${templateName}`;
+				errorBtn.title = `Looking for: ${templatePath}`;
+				errorBtn.disabled = true;
+				codeEl.replaceWith(errorBtn);
+				return;
+			}
+
+			// Read template to get project info
+			let project: string | null = null;
+			try {
+				const content = await this.app.vault.read(templateFile);
+				// Match frontmatter anywhere in the file (not just at start) to handle Templater code
+				const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+				const match = content.match(frontmatterRegex);
+				
+				if (match) {
+					const frontmatter = match[1];
+					const lines = frontmatter.split('\n');
+					
+					for (const line of lines) {
+						if (line.trim().startsWith(this.settings.projectKey + ':')) {
+							project = line.split(':').slice(1).join(':').trim(); // Handle colons in project name
+							// Remove quotes and wikilink syntax - use simple string replaceAll
+							if (project) {
+								// Remove wikilinks
+								project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
+							// Remove quotes
+							project = project.replace(/^["']+|["']+$/g, '');
+							project = project.trim();
+						}
+						break;
+						}
+					}
+				}
+			} catch (error) {
+				console.error('Error reading template:', error);
+			}
+
+			// Get project color if available
+			let projectColor: string | null = null;
+			if (project) {
+				projectColor = await this.getProjectColor(project);
+			}
+
+			// Create button
+			const button = document.createElement('button');
+			button.className = 'lapse-button';
+			
+			// Build button structure with two lines
+			const topLine = document.createElement('div');
+			topLine.className = 'lapse-button-name';
+			topLine.style.display = 'flex';
+			topLine.style.justifyContent = 'flex-start';
+			topLine.style.alignItems = 'center';
+			topLine.style.gap = '8px';
+			topLine.style.minWidth = '0'; // Allow truncation
+			
+			// Title element (will truncate if needed)
+			const titleEl = document.createElement('span');
+			titleEl.className = 'lapse-button-title';
+			titleEl.textContent = templateName;
+			titleEl.style.overflow = 'hidden';
+			titleEl.style.textOverflow = 'ellipsis';
+			titleEl.style.whiteSpace = 'nowrap';
+			titleEl.style.flex = '1';
+			titleEl.style.minWidth = '0';
+			topLine.appendChild(titleEl);
+			
+			// Calculate and display duration if enabled
+			if (this.settings.showDurationOnNoteButtons) {
+				try {
+					const duration = await this.getTemplateButtonDuration(templateName, project);
+					if (duration > 0) {
+				const durationText = this.formatTimeForButton(duration);
+				const durationEl = document.createElement('span');
+				durationEl.className = 'lapse-button-duration';
+				durationEl.textContent = durationText;
+				durationEl.style.flexShrink = '0';
+				durationEl.style.marginLeft = 'auto';
+				topLine.appendChild(durationEl);
+					}
+				} catch (error) {
+					console.error('Error calculating duration:', error);
+				}
+			}
+			button.appendChild(topLine);
+			
+			if (project) {
+				const bottomLine = document.createElement('div');
+				bottomLine.className = 'lapse-button-project';
+				bottomLine.textContent = project;
+				button.appendChild(bottomLine);
+			}
+			
+			// Apply project color to left border and project name pill
+			if (projectColor) {
+				// Color the left border
+				button.style.borderLeftColor = projectColor;
+				
+				// Style the project name pill with solid color background and contrasting text
+				if (project) {
+					const bottomLine = button.querySelector('.lapse-button-project') as HTMLElement;
+					if (bottomLine) {
+						// Set the pill background to the project color
+						bottomLine.style.backgroundColor = projectColor;
+						
+						// Use contrasting text color (white or black depending on brightness)
+						const contrastColor = this.getContrastColor(projectColor);
+						bottomLine.style.color = contrastColor;
+					}
+				}
+			}
+			
+			// Handle click - create new note from template
+			button.onclick = async () => {
+				try {
+					// Use Obsidian's templater or just copy the template
+					const templateContent = await this.app.vault.read(templateFile);
+					
+					// Generate a new note name with timestamp
+					const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+					const newNoteName = `${templateName} ${timestamp}`;
+					
+					// Determine where to create the note (same folder as template or root)
+					const newNotePath = `${newNoteName}.md`;
+					
+					// Create the new note
+					const newFile = await this.app.vault.create(newNotePath, templateContent);
+					
+					// Open the new note
+					await this.app.workspace.getLeaf(false).openFile(newFile);
+				} catch (error) {
+					console.error('Error creating note from template:', error);
+				}
+			};
+			
+			// Replace the code element with the button
+			codeEl.replaceWith(button);
+		} catch (error) {
+			console.error('Error processing lapse button:', error);
+			// Show error button on failure
 			const errorBtn = document.createElement('button');
 			errorBtn.className = 'lapse-button lapse-button-error';
-			errorBtn.textContent = `⚠️ Template not found: ${templateName}`;
-			errorBtn.title = `Looking for: ${templatePath}`;
+			errorBtn.textContent = `⚠️ Error: ${templateName}`;
+			errorBtn.title = `Error processing button: ${error}`;
 			errorBtn.disabled = true;
 			codeEl.replaceWith(errorBtn);
-			return;
 		}
-
-		// Read template to get project info
-		let project: string | null = null;
-		try {
-			const content = await this.app.vault.read(templateFile);
-			// Match frontmatter anywhere in the file (not just at start) to handle Templater code
-			const frontmatterRegex = /---\n([\s\S]*?)\n---/;
-			const match = content.match(frontmatterRegex);
-			
-			if (match) {
-				const frontmatter = match[1];
-				const lines = frontmatter.split('\n');
-				
-				for (const line of lines) {
-					if (line.trim().startsWith(this.settings.projectKey + ':')) {
-						project = line.split(':').slice(1).join(':').trim(); // Handle colons in project name
-						// Remove quotes and wikilink syntax - use simple string replaceAll
-						if (project) {
-							// Remove wikilinks
-							project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
-						// Remove quotes
-						project = project.replace(/^["']+|["']+$/g, '');
-						project = project.trim();
-					}
-					break;
-					}
-				}
-			}
-		} catch (error) {
-			console.error('Error reading template:', error);
-		}
-
-		// Get project color if available
-		let projectColor: string | null = null;
-		if (project) {
-			projectColor = await this.getProjectColor(project);
-		}
-
-		// Create button
-		const button = document.createElement('button');
-		button.className = 'lapse-button';
-		
-		// Build button structure with two lines
-		const topLine = document.createElement('div');
-		topLine.className = 'lapse-button-name';
-		topLine.textContent = templateName;
-		button.appendChild(topLine);
-		
-		if (project) {
-			const bottomLine = document.createElement('div');
-			bottomLine.className = 'lapse-button-project';
-			bottomLine.textContent = project;
-			button.appendChild(bottomLine);
-		}
-		
-		// Apply project color to left border and project name pill
-		if (projectColor) {
-			// Color the left border
-			button.style.borderLeftColor = projectColor;
-			
-			// Style the project name pill with solid color background and contrasting text
-			if (project) {
-				const bottomLine = button.querySelector('.lapse-button-project') as HTMLElement;
-				if (bottomLine) {
-					// Set the pill background to the project color
-					bottomLine.style.backgroundColor = projectColor;
-					
-					// Use contrasting text color (white or black depending on brightness)
-					const contrastColor = this.getContrastColor(projectColor);
-					bottomLine.style.color = contrastColor;
-				}
-			}
-		}
-		
-		// Handle click - create new note from template
-		button.onclick = async () => {
-			try {
-				// Use Obsidian's templater or just copy the template
-				const templateContent = await this.app.vault.read(templateFile);
-				
-				// Generate a new note name with timestamp
-				const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-				const newNoteName = `${templateName} ${timestamp}`;
-				
-				// Determine where to create the note (same folder as template or root)
-				const newNotePath = `${newNoteName}.md`;
-				
-				// Create the new note
-				const newFile = await this.app.vault.create(newNotePath, templateContent);
-				
-				// Open the new note
-				await this.app.workspace.getLeaf(false).openFile(newFile);
-			} catch (error) {
-				console.error('Error creating note from template:', error);
-			}
-		};
-		
-		// Replace the code element with the button
-		codeEl.replaceWith(button);
 	}
 
 	// Helper to get contrasting text color for a background color
@@ -1432,6 +1476,18 @@ export default class LapsePlugin extends Plugin {
 
 
 	async processReportCodeBlock(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
+		// Create container immediately
+		const container = el.createDiv({ cls: 'lapse-report-container' });
+		
+		// Show loading indicator
+		const loadingContainer = container.createDiv({ cls: 'lapse-report-loading' });
+		const loadingText = loadingContainer.createDiv({ cls: 'lapse-report-loading-text' });
+		loadingText.setText('Loading Lapse Report');
+		
+		const spinnerContainer = loadingContainer.createDiv({ cls: 'lapse-report-loading-spinner' });
+		const spinner = spinnerContainer.createEl('span', { cls: 'lapse-spinner-icon' });
+		setIcon(spinner, 'loader-2');
+		
 		// Parse the query
 		const query = this.parseQuery(source);
 		
@@ -1455,8 +1511,8 @@ export default class LapsePlugin extends Plugin {
 		
 		console.log('Grouped Data:', groupedData.size, 'groups');
 		
-		// Render based on display type
-		const container = el.createDiv({ cls: 'lapse-report-container' });
+		// Clear loading indicator and render actual content
+		container.empty();
 		
 		if (query.display === 'summary') {
 			await this.renderReportSummary(container, groupedData, query);
@@ -1473,11 +1529,12 @@ export default class LapsePlugin extends Plugin {
 		// Create container
 		const container = el.createDiv({ cls: 'lapse-active-container' });
 		
-		// Function to render active timers
-		const renderActiveTimers = async () => {
-			container.empty();
-			
-			// Get all active timers from all files
+		// Track time displays and intervals for this instance
+		const timeDisplays = new Map<string, HTMLElement>();
+		const updateIntervals = new Map<string, number>();
+		
+		// Function to get all active timers
+		const getActiveTimers = async (): Promise<Array<{ filePath: string; entry: TimeEntry }>> => {
 			const activeTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
 			
 			// First, always check the current file (important for same-page timers)
@@ -1535,6 +1592,21 @@ export default class LapsePlugin extends Plugin {
 				});
 			}
 			
+			return activeTimers;
+		};
+		
+		// Function to render active timers (full render)
+		const renderActiveTimers = async () => {
+			// Clear existing intervals
+			updateIntervals.forEach(intervalId => window.clearInterval(intervalId));
+			updateIntervals.clear();
+			timeDisplays.clear();
+			
+			container.empty();
+			
+			// Get all active timers
+			const activeTimers = await getActiveTimers();
+			
 			// If no active timers, show message
 			if (activeTimers.length === 0) {
 				container.createEl('p', { text: 'No active timers', cls: 'lapse-active-empty' });
@@ -1552,6 +1624,7 @@ export default class LapsePlugin extends Plugin {
 					text: timeText, 
 					cls: 'lapse-active-time' 
 				});
+				timeDisplays.set(entry.id, timeDisplay);
 				
 				// Label (read-only)
 				const labelDisplay = row.createDiv({ 
@@ -1596,27 +1669,66 @@ export default class LapsePlugin extends Plugin {
 				const intervalId = window.setInterval(() => {
 					if (entry.startTime && !entry.endTime) {
 						const newElapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime));
-						timeDisplay.setText(this.formatTimeAsHHMMSS(newElapsed));
+						const display = timeDisplays.get(entry.id);
+						if (display) {
+							display.setText(this.formatTimeAsHHMMSS(newElapsed));
+						}
 					} else {
 						// Timer stopped, clear interval
 						window.clearInterval(intervalId);
+						updateIntervals.delete(entry.id);
 					}
 				}, 1000);
+				updateIntervals.set(entry.id, intervalId);
+			}
+		};
+		
+		// Function to update timers without full re-render
+		const updateTimers = async () => {
+			const activeTimers = await getActiveTimers();
+			const activeEntryIds = new Set(activeTimers.map(({ entry }) => entry.id));
+			const displayedEntryIds = new Set(timeDisplays.keys());
+			
+			// Check if we need a full refresh (new timer or timer stopped)
+			const needsFullRefresh = 
+				activeTimers.length !== displayedEntryIds.size ||
+				![...displayedEntryIds].every(id => activeEntryIds.has(id)) ||
+				!activeTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
+			
+			if (needsFullRefresh) {
+				await renderActiveTimers();
+				return;
+			}
+			
+			// Only update time displays for existing timers
+			for (const { entry } of activeTimers) {
+				const timeDisplay = timeDisplays.get(entry.id);
+				if (timeDisplay && entry.startTime && !entry.endTime) {
+					const elapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime));
+					timeDisplay.setText(this.formatTimeAsHHMMSS(elapsed));
+				}
 			}
 		};
 		
 		// Initial render
 		await renderActiveTimers();
 		
-		// Refresh every 5 seconds to catch new timers
-		const refreshInterval = window.setInterval(async () => {
-			await renderActiveTimers();
-		}, 5000);
+		// Update timers every second (only updates time displays, not full re-render)
+		const updateInterval = window.setInterval(() => {
+			updateTimers().catch(err => console.error('Error updating active timers:', err));
+		}, 1000);
 		
-		// Clean up interval when the element is removed
+		// Check for new timers every 30 seconds (full refresh if needed)
+		const refreshInterval = window.setInterval(async () => {
+			await updateTimers();
+		}, 30000);
+		
+		// Clean up intervals when the element is removed
 		ctx.addChild({
 			unload: () => {
+				window.clearInterval(updateInterval);
 				window.clearInterval(refreshInterval);
+				updateIntervals.forEach(intervalId => window.clearInterval(intervalId));
 			}
 		} as any);
 	}
@@ -1827,38 +1939,25 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	/**
-	 * Calculate duration for a note based on settings
+	 * Calculate duration for a template button based on settings
+	 * Always aggregates across multiple notes based on the duration type
 	 */
-	async getNoteButtonDuration(filePath: string): Promise<number> {
+	async getTemplateButtonDuration(templateName: string, templateProject: string | null): Promise<number> {
 		if (!this.settings.showDurationOnNoteButtons) {
 			return 0;
 		}
 
-		if (this.settings.noteButtonDurationType === 'timePeriod') {
-			// Calculate duration for the specified time period
-			const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
-			const { entries } = await this.getCachedOrLoadEntries(filePath);
-			
-			let totalDuration = 0;
-			for (const entry of entries) {
-				if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
-					const entryDuration = entry.endTime 
-						? entry.duration 
-						: entry.duration + (Date.now() - entry.startTime);
-					totalDuration += entryDuration;
-				}
+		// Get the time period for the calculation
+		const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+		
+		let totalDuration = 0;
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+		
+		if (this.settings.noteButtonDurationType === 'project') {
+			// Aggregate by project: include all notes with the same project
+			if (!templateProject) {
+				return 0; // No project, so no aggregate to show
 			}
-			return totalDuration;
-		} else {
-			// Calculate duration for project or note
-			const defaultNoteName = this.getDefaultNoteName(filePath);
-			const project = await this.getProjectFromFrontmatter(filePath);
-			
-			// Get the time period for the calculation
-			const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
-			
-			let totalDuration = 0;
-			const markdownFiles = this.app.vault.getMarkdownFiles();
 			
 			for (const file of markdownFiles) {
 				const currentFilePath = file.path;
@@ -1868,46 +1967,224 @@ export default class LapsePlugin extends Plugin {
 					continue;
 				}
 				
-				if (this.settings.noteButtonGroupBy === 'project') {
-					// Group by project: include all notes with the same project
-					const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
-					if (currentProject === project && project) {
-						const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+				// Get project for this file
+				const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
+				
+				// Only include notes with the same project (and that have lapse frontmatter)
+				if (currentProject === templateProject) {
+					const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+					// Only count if the file has lapse entries (has frontmatter with lapse data)
+					if (entries.length > 0) {
 						for (const entry of entries) {
-							if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
-								const entryDuration = entry.endTime 
-									? entry.duration 
-									: entry.duration + (Date.now() - entry.startTime);
-								totalDuration += entryDuration;
-							}
-						}
-					}
-				} else {
-					// Group by note: include all notes with the same default name (without timestamp)
-					const currentDefaultName = this.getDefaultNoteName(currentFilePath);
-					if (currentDefaultName === defaultNoteName) {
-						// Only count if the current note name (without timestamp) matches the default name
-						// This ensures we only count notes that haven't been renamed from their default
-						const currentFileName = file.basename;
-						const currentNameWithoutTimestamp = this.removeTimestampFromFileName(currentFileName);
-						// The default name is already without timestamp, so compare directly
-						if (currentNameWithoutTimestamp === defaultNoteName) {
-							const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
-							for (const entry of entries) {
-								if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
-									const entryDuration = entry.endTime 
-										? entry.duration 
-										: entry.duration + (Date.now() - entry.startTime);
-									totalDuration += entryDuration;
+							if (entry.startTime) {
+								// Count entries that overlap with the time period
+								const entryStart = entry.startTime;
+								const entryEnd = entry.endTime || Date.now();
+								
+								// Entry overlaps if it starts before period ends and ends after period starts
+								if (entryStart <= endTime && entryEnd >= startTime) {
+									// Calculate the portion of duration within the period
+									const periodStart = Math.max(entryStart, startTime);
+									const periodEnd = Math.min(entryEnd, endTime);
+									
+									if (entry.endTime) {
+										// Completed entry: use stored duration, but only count the portion within period
+										// entry.duration is the actual tracked duration (may include pauses)
+										const entryTotalDuration = entryEnd - entryStart;
+										if (entryTotalDuration > 0) {
+											// Calculate what portion of the entry's time span is within the period
+											const periodDuration = periodEnd - periodStart;
+											// Scale the stored duration proportionally
+											const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+											totalDuration += scaledDuration;
+										}
+									} else {
+										// Active entry: use actual time within period
+										totalDuration += (periodEnd - periodStart);
+									}
 								}
 							}
 						}
 					}
 				}
 			}
-			
-			return totalDuration;
+		} else {
+			// Aggregate by note: include all notes that share the same base filename (template name, ignoring timestamp)
+			for (const file of markdownFiles) {
+				const currentFilePath = file.path;
+				
+				// Skip excluded folders
+				if (this.isFileExcluded(currentFilePath)) {
+					continue;
+				}
+				
+				// Get base name (without timestamp) for this file
+				const currentBaseName = this.getDefaultNoteName(currentFilePath);
+				
+				// Include all notes with the same base name as the template (ignoring timestamp)
+				if (currentBaseName === templateName) {
+					const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+					for (const entry of entries) {
+						if (entry.startTime) {
+							// Count entries that overlap with the time period
+							const entryStart = entry.startTime;
+							const entryEnd = entry.endTime || Date.now();
+							
+							// Entry overlaps if it starts before period ends and ends after period starts
+							if (entryStart <= endTime && entryEnd >= startTime) {
+								// Calculate the portion of duration within the period
+								const periodStart = Math.max(entryStart, startTime);
+								const periodEnd = Math.min(entryEnd, endTime);
+								
+								if (entry.endTime) {
+									// Completed entry: use stored duration, but only count the portion within period
+									// entry.duration is the actual tracked duration (may include pauses)
+									const entryTotalDuration = entryEnd - entryStart;
+									if (entryTotalDuration > 0) {
+										// Calculate what portion of the entry's time span is within the period
+										const periodDuration = periodEnd - periodStart;
+										// Scale the stored duration proportionally
+										const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+										totalDuration += scaledDuration;
+									}
+								} else {
+									// Active entry: use actual time within period
+									totalDuration += (periodEnd - periodStart);
+								}
+							}
+						}
+					}
+				}
+			}
 		}
+		
+		return totalDuration;
+	}
+
+	/**
+	 * Calculate duration for a note based on settings
+	 * Always aggregates across multiple notes based on the duration type
+	 */
+	async getNoteButtonDuration(filePath: string): Promise<number> {
+		if (!this.settings.showDurationOnNoteButtons) {
+			return 0;
+		}
+
+		// Get the time period for the calculation
+		const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+		
+		let totalDuration = 0;
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+		
+		if (this.settings.noteButtonDurationType === 'project') {
+			// Aggregate by project: include all notes with the same project (that have lapse frontmatter)
+			const project = await this.getProjectFromFrontmatter(filePath);
+			if (!project) {
+				return 0; // No project, so no aggregate to show
+			}
+			
+			for (const file of markdownFiles) {
+				const currentFilePath = file.path;
+				
+				// Skip excluded folders
+				if (this.isFileExcluded(currentFilePath)) {
+					continue;
+				}
+				
+				// Get project for this file
+				const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
+				
+				// Only include notes with the same project (and that have lapse frontmatter)
+				if (currentProject === project) {
+					const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+					// Only count if the file has lapse entries (has frontmatter with lapse data)
+					if (entries.length > 0) {
+						for (const entry of entries) {
+							if (entry.startTime) {
+								// Count entries that overlap with the time period
+								const entryStart = entry.startTime;
+								const entryEnd = entry.endTime || Date.now();
+								
+								// Entry overlaps if it starts before period ends and ends after period starts
+								if (entryStart <= endTime && entryEnd >= startTime) {
+									// Calculate the portion of duration within the period
+									const periodStart = Math.max(entryStart, startTime);
+									const periodEnd = Math.min(entryEnd, endTime);
+									
+									if (entry.endTime) {
+										// Completed entry: use stored duration, but only count the portion within period
+										// entry.duration is the actual tracked duration (may include pauses)
+										const entryTotalDuration = entryEnd - entryStart;
+										if (entryTotalDuration > 0) {
+											// Calculate what portion of the entry's time span is within the period
+											const periodDuration = periodEnd - periodStart;
+											// Scale the stored duration proportionally
+											const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+											totalDuration += scaledDuration;
+										}
+									} else {
+										// Active entry: use actual time within period
+										totalDuration += (periodEnd - periodStart);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			// Aggregate by note: include all notes that share the same base filename (without timestamp)
+			const baseNoteName = this.getDefaultNoteName(filePath);
+			
+			for (const file of markdownFiles) {
+				const currentFilePath = file.path;
+				
+				// Skip excluded folders
+				if (this.isFileExcluded(currentFilePath)) {
+					continue;
+				}
+				
+				// Get base name (without timestamp) for this file
+				const currentBaseName = this.getDefaultNoteName(currentFilePath);
+				
+				// Include all notes with the same base name (ignoring timestamp)
+				if (currentBaseName === baseNoteName) {
+					const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+					for (const entry of entries) {
+						if (entry.startTime) {
+							// Count entries that overlap with the time period
+							const entryStart = entry.startTime;
+							const entryEnd = entry.endTime || Date.now();
+							
+							// Entry overlaps if it starts before period ends and ends after period starts
+							if (entryStart <= endTime && entryEnd >= startTime) {
+								// Calculate the portion of duration within the period
+								const periodStart = Math.max(entryStart, startTime);
+								const periodEnd = Math.min(entryEnd, endTime);
+								
+								if (entry.endTime) {
+									// Completed entry: use stored duration, but only count the portion within period
+									// entry.duration is the actual tracked duration (may include pauses)
+									const entryTotalDuration = entryEnd - entryStart;
+									if (entryTotalDuration > 0) {
+										// Calculate what portion of the entry's time span is within the period
+										const periodDuration = periodEnd - periodStart;
+										// Scale the stored duration proportionally
+										const scaledDuration = entry.duration * (periodDuration / entryTotalDuration);
+										totalDuration += scaledDuration;
+									}
+								} else {
+									// Active entry: use actual time within period
+									totalDuration += (periodEnd - periodStart);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		return totalDuration;
 	}
 
 	async getMatchingEntries(query: LapseQuery, startTime: number, endTime: number): Promise<Array<{
@@ -2656,6 +2933,20 @@ export default class LapsePlugin extends Plugin {
 		return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 	}
 
+	formatTimeForButton(milliseconds: number): string {
+		const totalSeconds = Math.floor(milliseconds / 1000);
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+		
+		// Hide hours if 00, otherwise show HH:MM:SS
+		if (hours > 0) {
+			return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		} else {
+			return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		}
+	}
+
 	formatTimeForTimerDisplay(milliseconds: number): string {
 		const totalSeconds = Math.floor(milliseconds / 1000);
 		const hours = Math.floor(totalSeconds / 3600);
@@ -3150,15 +3441,6 @@ class LapseSidebarView extends ItemView {
 					}
 				};
 				
-				// Show duration on note button if enabled
-				if (this.plugin.settings.showDurationOnNoteButtons) {
-					const duration = await this.plugin.getNoteButtonDuration(filePath);
-					if (duration > 0) {
-						const durationText = this.plugin.formatTimeAsHHMMSS(duration);
-						link.setText(`${fileName} (${durationText})`);
-					}
-				}
-				
 				// Get project from frontmatter
 				const project = await this.plugin.getProjectFromFrontmatter(filePath);
 				
@@ -3288,15 +3570,6 @@ class LapseSidebarView extends ItemView {
 					}
 				};
 				
-				// Show duration on note button if enabled
-				if (this.plugin.settings.showDurationOnNoteButtons) {
-					const duration = await this.plugin.getNoteButtonDuration(filePath);
-					if (duration > 0) {
-						const durationText = this.plugin.formatTimeAsHHMMSS(duration);
-						link.setText(`${fileName} (${durationText})`);
-					}
-				}
-				
 				// Total time tracked on the right
 				const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
 				topLine.createSpan({ text: timeText, cls: 'lapse-sidebar-time' });
@@ -3348,8 +3621,8 @@ class LapseSidebarView extends ItemView {
 		// Increment refresh counter
 		this.refreshCounter++;
 		
-		// Every 10 seconds (10 calls at 1 second interval), do a full refresh to catch metadata changes
-		if (this.refreshCounter >= 10) {
+		// Every 30 seconds (30 calls at 1 second interval), do a full refresh to catch metadata changes
+		if (this.refreshCounter >= 30) {
 			this.refreshCounter = 0;
 			// Clear cache for files that have active entries to reload fresh metadata
 			this.plugin.timeData.forEach((pageData, filePath) => {
@@ -3372,29 +3645,31 @@ class LapseSidebarView extends ItemView {
 		const displayedEntryIds = new Set(this.timeDisplays.keys());
 		const activeEntryIds = new Set(currentActiveTimers.map(({ entry }) => entry.id));
 		
-		// If there are new active timers or timers that stopped, do a full refresh
-		if (currentActiveTimers.length !== displayedEntryIds.size || 
-		    ![...displayedEntryIds].every(id => activeEntryIds.has(id))) {
+		// Check if we need a full refresh (new timer started or timer stopped)
+		const needsFullRefresh = 
+			currentActiveTimers.length !== displayedEntryIds.size || 
+			![...displayedEntryIds].every(id => activeEntryIds.has(id)) ||
+			!currentActiveTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
+		
+		if (needsFullRefresh) {
 			// New timer started or timer stopped - do full refresh
 			await this.render();
 			return;
 		}
 		
-		// Only update the time displays for existing timers
-		this.timeDisplays.forEach((timeDisplay, entryId) => {
+		// Only update the time displays for existing timers (no full refresh)
+		for (const [entryId, timeDisplay] of this.timeDisplays.entries()) {
 			// Find the entry in timeData
 			let foundEntry: TimeEntry | null = null;
-			let found = false;
 			
 			for (const [filePath, pageData] of this.plugin.timeData) {
 				for (const entry of pageData.entries) {
 					if (entry.id === entryId && entry.startTime && !entry.endTime) {
 						foundEntry = entry;
-						found = true;
 						break;
 					}
 				}
-				if (found) break;
+				if (foundEntry) break;
 			}
 			
 			if (foundEntry && foundEntry.startTime) {
@@ -3402,10 +3677,25 @@ class LapseSidebarView extends ItemView {
 				const timeText = this.plugin.formatTimeAsHHMMSS(elapsed);
 				timeDisplay.setText(timeText);
 			} else {
-				// Entry no longer active, remove from map
+				// Entry no longer active, remove from map and trigger full refresh
 				this.timeDisplays.delete(entryId);
+				await this.render();
+				return;
 			}
-		});
+		}
+		
+		// Also update the pie chart if visible (only if chart is shown)
+		if (this.showChart && this.refreshCounter % 5 === 0) {
+			// Update pie chart every 5 seconds without full refresh
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStart = today.getTime();
+			const chartContainer = this.containerEl.querySelector('.lapse-pie-chart-container');
+			if (chartContainer) {
+				// Only update if chart exists - don't re-render everything
+				// Chart updates are handled internally by the chart library if needed
+			}
+		}
 	}
 
 	async renderPieChart(container: HTMLElement, todayStart: number) {
@@ -3627,6 +3917,20 @@ class LapseButtonsView extends ItemView {
 		// Header
 		const header = container.createDiv({ cls: 'lapse-buttons-header' });
 		header.createEl('h2', { text: 'Quick Start' });
+		
+		// Header buttons container
+		const headerButtons = header.createDiv({ cls: 'lapse-buttons-header-buttons' });
+		
+		// Refresh button
+		const refreshBtn = headerButtons.createEl('button', { 
+			cls: 'lapse-buttons-refresh-btn clickable-icon',
+			attr: { 'aria-label': 'Refresh' }
+		});
+		setIcon(refreshBtn, 'refresh-cw');
+		refreshBtn.onclick = async () => {
+			// Re-render to rebuild buttons (e.g., after adding a new template)
+			await this.render();
+		};
 
 		// Get all template files from the configured folder
 		const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
@@ -3746,9 +4050,39 @@ class LapseButtonsView extends ItemView {
 			for (const data of projectTemplates) {
 				const button = buttonsGrid.createEl('button', { cls: 'lapse-button' });
 				
-				// Title
-				const titleEl = button.createDiv({ cls: 'lapse-button-name' });
+				// Build button structure with title and duration
+				const topLine = button.createDiv({ cls: 'lapse-button-name' });
+				topLine.style.display = 'flex';
+				topLine.style.justifyContent = 'flex-start';
+				topLine.style.alignItems = 'center';
+				topLine.style.gap = '8px';
+				topLine.style.minWidth = '0';
+				
+				// Title element (will truncate if needed)
+				const titleEl = topLine.createSpan({ cls: 'lapse-button-title' });
 				titleEl.textContent = data.templateName;
+				titleEl.style.overflow = 'hidden';
+				titleEl.style.textOverflow = 'ellipsis';
+				titleEl.style.whiteSpace = 'nowrap';
+				titleEl.style.flex = '1';
+				titleEl.style.minWidth = '0';
+				titleEl.style.textAlign = 'left';
+				
+				// Calculate and display duration if enabled
+				if (this.plugin.settings.showDurationOnNoteButtons) {
+					try {
+						const duration = await this.plugin.getTemplateButtonDuration(data.templateName, data.project);
+						if (duration > 0) {
+							const durationText = this.plugin.formatTimeForButton(duration);
+							const durationEl = topLine.createSpan({ cls: 'lapse-button-duration' });
+							durationEl.textContent = durationText;
+							durationEl.style.flexShrink = '0';
+							durationEl.style.marginLeft = 'auto';
+						}
+					} catch (error) {
+						console.error('Error calculating duration for Quick Start button:', error);
+					}
+				}
 				
 				// Project pill if exists
 				if (data.project) {
@@ -3997,7 +4331,7 @@ class LapseSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Show duration on note buttons')
-			.setDesc('Display task duration on note links in the Activity sidebar')
+			.setDesc('Display task duration on inline lapse buttons (e.g., `lapse:Dishes`)')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.showDurationOnNoteButtons)
 				.onChange(async (value) => {
@@ -4014,13 +4348,13 @@ class LapseSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.showDurationOnNoteButtons) {
 			new Setting(containerEl)
 				.setName('Duration type')
-				.setDesc('Choose how to calculate duration: time period or project/note aggregate')
+				.setDesc('Project: aggregate time from all notes with the same project. Note: aggregate time from all notes with the same base filename (ignoring timestamp).')
 				.addDropdown(dropdown => dropdown
-					.addOption('timePeriod', 'Time Period')
-					.addOption('projectOrNote', 'Project or Note')
+					.addOption('project', 'Project')
+					.addOption('note', 'Note')
 					.setValue(this.plugin.settings.noteButtonDurationType)
 					.onChange(async (value) => {
-						this.plugin.settings.noteButtonDurationType = value as 'timePeriod' | 'projectOrNote';
+						this.plugin.settings.noteButtonDurationType = value as 'project' | 'note';
 						await this.plugin.saveSettings();
 						// Refresh sidebar to update note buttons
 						this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
@@ -4050,26 +4384,6 @@ class LapseSettingTab extends PluginSettingTab {
 							}
 						});
 					}));
-
-			if (this.plugin.settings.noteButtonDurationType === 'projectOrNote') {
-				new Setting(containerEl)
-					.setName('Group by')
-					.setDesc('Show aggregate time for project (all notes with same project) or note (all notes with same default name)')
-					.addDropdown(dropdown => dropdown
-						.addOption('project', 'Project')
-						.addOption('note', 'Note')
-						.setValue(this.plugin.settings.noteButtonGroupBy)
-						.onChange(async (value) => {
-							this.plugin.settings.noteButtonGroupBy = value as 'project' | 'note';
-							await this.plugin.saveSettings();
-							// Refresh sidebar to update note buttons
-							this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
-								if (leaf.view instanceof LapseSidebarView) {
-									leaf.view.refresh();
-								}
-							});
-						}));
-			}
 		}
 
 		new Setting(containerEl)
@@ -4185,103 +4499,17 @@ class LapseSettingTab extends PluginSettingTab {
 				ul.createEl('li', { text: '**/Archive - Any folder ending in Archive' });
 			});
 
-		containerEl.createEl('h3', { text: 'Cache Management' });
-
-		// Cache info display
-		const cacheSize = Object.keys(this.plugin.entryCache).length;
-		const cacheInfoSetting = new Setting(containerEl)
-			.setName('Entry cache')
-			.setDesc(`Currently caching ${cacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
-
-		// Clear cache button
-		new Setting(containerEl)
-			.setName('Clear cache')
-			.setDesc('Delete all cached time entries. The cache will automatically rebuild as you use the plugin. Use this if you\'re experiencing issues or want to free up space.')
-			.addButton(button => button
-				.setButtonText('Clear Cache')
-				.setWarning()
-				.onClick(async () => {
-					// Confirm with user
-					const confirmed = confirm(
-						`Clear cache for ${cacheSize} files?\n\n` +
-						'This will delete all cached time entries. Your timer data in notes is safe. ' +
-						'The cache will rebuild automatically as you use the plugin.'
-					);
-					
-					if (confirmed) {
-						// Clear the cache
-						this.plugin.entryCache = {};
-						await this.plugin.saveSettings();
-						
-						// Update the cache info display
-						cacheInfoSetting.setDesc('Currently caching 0 files. The cache speeds up reports and activity views by storing time entry data.');
-						
-						// Show success message
-						button.setButtonText('Cache Cleared!');
-						setTimeout(() => {
-							button.setButtonText('Clear Cache');
-						}, 2000);
-					}
-				}));
-
-		// Rebuild cache button
-		new Setting(containerEl)
-			.setName('Rebuild cache')
-			.setDesc('Force a complete rebuild of the cache by scanning all markdown files in your vault. This may take a while for large vaults.')
-			.addButton(button => button
-				.setButtonText('Rebuild Cache')
-				.onClick(async () => {
-					button.setButtonText('Rebuilding...');
-					button.setDisabled(true);
-					
-					try {
-						// Clear existing cache
-						this.plugin.entryCache = {};
-						
-						// Scan all markdown files
-						const files = this.app.vault.getMarkdownFiles();
-						let processedCount = 0;
-						
-						for (const file of files) {
-							const filePath = file.path;
-							
-							// Skip excluded folders
-							if (this.plugin.isFileExcluded(filePath)) {
-								continue;
-							}
-							
-							// Load and cache entries
-							await this.plugin.getCachedOrLoadEntries(filePath);
-							processedCount++;
-							
-							// Update button text periodically
-							if (processedCount % 100 === 0) {
-								button.setButtonText(`Rebuilding... ${processedCount}/${files.length}`);
-							}
-						}
-						
-						// Save the rebuilt cache
-						await this.plugin.saveSettings();
-						
-						// Update cache info
-						const newCacheSize = Object.keys(this.plugin.entryCache).length;
-						cacheInfoSetting.setDesc(`Currently caching ${newCacheSize} files. The cache speeds up reports and activity views by storing time entry data.`);
-						
-						// Show success
-						button.setButtonText('Rebuild Complete!');
-						setTimeout(() => {
-							button.setButtonText('Rebuild Cache');
-							button.setDisabled(false);
-						}, 3000);
-					} catch (error) {
-						console.error('Lapse: Error rebuilding cache', error);
-						button.setButtonText('Rebuild Failed');
-						setTimeout(() => {
-							button.setButtonText('Rebuild Cache');
-							button.setDisabled(false);
-						}, 3000);
-					}
-				}));
+		// Add GitHub issue link at the bottom
+		containerEl.createEl('hr', { cls: 'lapse-settings-divider' });
+		
+		const githubLinkContainer = containerEl.createDiv({ cls: 'lapse-settings-footer' });
+		const githubLink = githubLinkContainer.createEl('a', {
+			text: 'Report an issue on GitHub',
+			href: 'https://github.com/jimmy-little/obsidian-lapse-tracker/issues/new',
+			cls: 'lapse-github-link'
+		});
+		githubLink.setAttr('target', '_blank');
+		githubLink.setAttr('rel', 'noopener noreferrer');
 	}
 }
 

@@ -399,6 +399,35 @@
     margin: 0;
 }
 
+.lapse-sidebar-header-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.lapse-sidebar-toggle-view-btn {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.lapse-sidebar-toggle-view-btn:hover {
+    opacity: 1;
+}
+
+.lapse-sidebar-toggle-view-btn.active {
+    opacity: 1;
+    color: var(--interactive-accent);
+}
+
+.lapse-sidebar-toggle-view-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
 .lapse-sidebar-refresh-btn {
     padding: 4px;
     border: none;
@@ -930,6 +959,142 @@
     background: var(--background-primary);
 }
 
+.lapse-report-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    gap: 12px;
+}
+
+.lapse-report-loading-text {
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.lapse-report-loading-spinner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.lapse-spinner-icon {
+    display: inline-block;
+    animation: lapse-spin 1s linear infinite;
+}
+
+@keyframes lapse-spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Active Timers Widget Styles */
+.lapse-active-container {
+    margin: 8px 0;
+}
+
+.lapse-active-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    margin: 4px 0;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+}
+
+.lapse-active-time {
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-accent);
+    min-width: 80px;
+    flex-shrink: 0;
+}
+
+.lapse-active-label {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-normal);
+    min-width: 0;
+}
+
+.lapse-active-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.lapse-active-btn {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+}
+
+.lapse-active-btn:hover {
+    opacity: 1;
+}
+
+.lapse-active-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.lapse-active-btn-stop {
+    color: var(--text-error, #d32f2f);
+}
+
+.lapse-active-btn-jump {
+    color: var(--text-normal);
+}
+
+.lapse-active-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 16px;
+    font-style: italic;
+}
+
+/* Settings Footer */
+.lapse-settings-divider {
+    margin: 32px 0 16px 0;
+    border: none;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.lapse-settings-footer {
+    padding: 16px 0;
+    text-align: center;
+}
+
+.lapse-github-link {
+    color: var(--text-accent);
+    text-decoration: none;
+    font-size: 13px;
+    transition: opacity 0.2s;
+}
+
+.lapse-github-link:hover {
+    opacity: 0.8;
+    text-decoration: underline;
+}
+
 .lapse-report-title {
     font-size: 16px;
     font-weight: 600;
@@ -1074,10 +1239,29 @@
     font-weight: 600;
     color: var(--text-normal);
     width: 100%;
-    white-space: nowrap;
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.lapse-button-title {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
     text-align: left;
+}
+
+.lapse-button-duration {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
 }
 
 .lapse-button-project {
@@ -1141,12 +1325,39 @@
 }
 
 .lapse-buttons-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     margin-bottom: 20px;
 }
 
 .lapse-buttons-header h2 {
     margin: 0;
     font-size: 24px;
+}
+
+.lapse-buttons-header-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.lapse-buttons-refresh-btn {
+    padding: 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.lapse-buttons-refresh-btn:hover {
+    opacity: 1;
+}
+
+.lapse-buttons-refresh-btn svg {
+    width: 16px;
+    height: 16px;
 }
 
 .lapse-buttons-project-section {
