@@ -19,7 +19,14 @@ interface LapseSettings {
 	firstDayOfWeek: number; // 0 = Sunday, 1 = Monday, etc.
 	excludedFolders: string[]; // Glob patterns for folders to exclude
 	showStatusBar: boolean; // Show active timer(s) in status bar
+<<<<<<< HEAD
 	lapseButtonTemplatesFolder: string; // Folder containing templates for lapse-button inline buttons
+=======
+	showDurationOnNoteButtons: boolean; // Show duration on note buttons/links
+	noteButtonDurationType: 'timePeriod' | 'projectOrNote'; // Type of duration to show
+	noteButtonTimePeriod: 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth'; // Time period for duration
+	noteButtonGroupBy: 'project' | 'note'; // Group by project or note
+>>>>>>> 57ec66d (in progress: settings updates)
 }
 
 const DEFAULT_SETTINGS: LapseSettings = {
@@ -41,7 +48,14 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	firstDayOfWeek: 0, // 0 = Sunday
 	excludedFolders: [], // No folders excluded by default
 	showStatusBar: true, // Show active timers in status bar by default
+<<<<<<< HEAD
 	lapseButtonTemplatesFolder: 'Templates/Lapse Buttons' // Default folder for lapse button templates
+=======
+	showDurationOnNoteButtons: false, // Don't show duration on note buttons by default
+	noteButtonDurationType: 'timePeriod', // Default to time period
+	noteButtonTimePeriod: 'today', // Default to today
+	noteButtonGroupBy: 'note' // Default to note
+>>>>>>> 57ec66d (in progress: settings updates)
 }
 
 interface TimeEntry {
@@ -61,7 +75,7 @@ interface LapseQuery {
 	from?: string;
 	to?: string;
 	period?: 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth';
-	groupBy?: 'project' | 'date' | 'tag';
+	groupBy?: 'project' | 'date' | 'tag' | 'note';
 	display?: 'table' | 'summary' | 'chart';
 	chart?: 'bar' | 'pie' | 'none';
 }
@@ -124,6 +138,7 @@ export default class LapsePlugin extends Plugin {
 		// Register the code block processors
 		this.registerMarkdownCodeBlockProcessor('lapse', this.processTimerCodeBlock.bind(this));
 		this.registerMarkdownCodeBlockProcessor('lapse-report', this.processReportCodeBlock.bind(this));
+		this.registerMarkdownCodeBlockProcessor('lapse-active', this.processActiveTimersCodeBlock.bind(this));
 
 		// Register inline code processor for lapse template buttons
 		this.registerMarkdownPostProcessor((el, ctx) => {
@@ -1454,6 +1469,158 @@ export default class LapsePlugin extends Plugin {
 		}
 	}
 
+	async processActiveTimersCodeBlock(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) {
+		// Create container
+		const container = el.createDiv({ cls: 'lapse-active-container' });
+		
+		// Function to render active timers
+		const renderActiveTimers = async () => {
+			container.empty();
+			
+			// Get all active timers from all files
+			const activeTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
+			
+			// First, always check the current file (important for same-page timers)
+			const currentFile = this.app.workspace.getActiveFile();
+			if (currentFile) {
+				const currentFilePath = currentFile.path;
+				// Force load from frontmatter for current file to ensure fresh data
+				await this.loadEntriesFromFrontmatter(currentFilePath);
+				
+				const currentPageData = this.timeData.get(currentFilePath);
+				if (currentPageData) {
+					currentPageData.entries.forEach(entry => {
+						if (entry.startTime && !entry.endTime) {
+							activeTimers.push({ filePath: currentFilePath, entry });
+						}
+					});
+				}
+			}
+			
+			// Check other entries already loaded in memory
+			this.timeData.forEach((pageData, filePath) => {
+				// Skip current file since we already checked it
+				if (currentFile && filePath === currentFile.path) {
+					return;
+				}
+				
+				pageData.entries.forEach(entry => {
+					if (entry.startTime && !entry.endTime) {
+						activeTimers.push({ filePath, entry });
+					}
+				});
+			});
+			
+			// Also check all other markdown files for active timers not yet in memory
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			for (const file of markdownFiles) {
+				const filePath = file.path;
+				
+				// Skip excluded folders
+				if (this.isFileExcluded(filePath)) {
+					continue;
+				}
+				
+				// Skip if already checked (including current file)
+				if (this.timeData.has(filePath)) {
+					continue;
+				}
+				
+				// Load entries from cache or frontmatter
+				const { entries } = await this.getCachedOrLoadEntries(filePath);
+				entries.forEach(entry => {
+					if (entry.startTime && !entry.endTime) {
+						activeTimers.push({ filePath, entry });
+					}
+				});
+			}
+			
+			// If no active timers, show message
+			if (activeTimers.length === 0) {
+				container.createEl('p', { text: 'No active timers', cls: 'lapse-active-empty' });
+				return;
+			}
+			
+			// Render each active timer as a simple row
+			for (const { filePath, entry } of activeTimers) {
+				const row = container.createDiv({ cls: 'lapse-active-row' });
+				
+				// Elapsed time
+				const elapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime!));
+				const timeText = this.formatTimeAsHHMMSS(elapsed);
+				const timeDisplay = row.createDiv({ 
+					text: timeText, 
+					cls: 'lapse-active-time' 
+				});
+				
+				// Label (read-only)
+				const labelDisplay = row.createDiv({ 
+					text: entry.label, 
+					cls: 'lapse-active-label' 
+				});
+				
+				// Action buttons container
+				const actionsContainer = row.createDiv({ cls: 'lapse-active-actions' });
+				
+				// Jump to note button
+				const jumpBtn = actionsContainer.createEl('button', {
+					cls: 'lapse-active-btn lapse-active-btn-jump',
+					attr: { 'aria-label': 'Jump to note' }
+				});
+				setIcon(jumpBtn, 'arrow-right');
+				jumpBtn.onclick = async () => {
+					await this.app.workspace.openLinkText(filePath, '', true);
+				};
+				
+				// Stop button
+				const stopBtn = actionsContainer.createEl('button', {
+					cls: 'lapse-active-btn lapse-active-btn-stop',
+					attr: { 'aria-label': 'Stop timer' }
+				});
+				setIcon(stopBtn, 'square');
+				stopBtn.onclick = async (e) => {
+					e.stopPropagation();
+					// Stop the timer
+					entry.endTime = Date.now();
+					entry.duration += (Date.now() - entry.startTime!);
+					entry.startTime = null;
+					
+					// Update frontmatter in the background
+					await this.updateFrontmatter(filePath);
+					
+					// Re-render to update the list
+					await renderActiveTimers();
+				};
+				
+				// Update elapsed time every second
+				const intervalId = window.setInterval(() => {
+					if (entry.startTime && !entry.endTime) {
+						const newElapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime));
+						timeDisplay.setText(this.formatTimeAsHHMMSS(newElapsed));
+					} else {
+						// Timer stopped, clear interval
+						window.clearInterval(intervalId);
+					}
+				}, 1000);
+			}
+		};
+		
+		// Initial render
+		await renderActiveTimers();
+		
+		// Refresh every 5 seconds to catch new timers
+		const refreshInterval = window.setInterval(async () => {
+			await renderActiveTimers();
+		}, 5000);
+		
+		// Clean up interval when the element is removed
+		ctx.addChild({
+			unload: () => {
+				window.clearInterval(refreshInterval);
+			}
+		} as any);
+	}
+
 	parseQuery(source: string): LapseQuery {
 		const query: LapseQuery = {
 			display: 'table',
@@ -1500,8 +1667,8 @@ export default class LapsePlugin extends Plugin {
 					}
 					break;
 				case 'group-by':
-					if (['project', 'date', 'tag'].includes(value.toLowerCase())) {
-						query.groupBy = value.toLowerCase() as 'project' | 'date' | 'tag';
+					if (['project', 'date', 'tag', 'note'].includes(value.toLowerCase())) {
+						query.groupBy = value.toLowerCase() as 'project' | 'date' | 'tag' | 'note';
 					}
 					break;
 				case 'display':
@@ -1602,6 +1769,145 @@ export default class LapsePlugin extends Plugin {
 		}
 		
 		return { startTime, endTime };
+	}
+
+	/**
+	 * Get the default note name (without timestamp) for a given file path
+	 */
+	getDefaultNoteName(filePath: string): string {
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (file && file instanceof TFile) {
+			return this.removeTimestampFromFileName(file.basename);
+		}
+		const fileName = filePath.split('/').pop()?.replace('.md', '') || filePath;
+		return this.removeTimestampFromFileName(fileName);
+	}
+
+	/**
+	 * Get date range for a time period
+	 */
+	getDateRangeForPeriod(period: 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth'): { startTime: number; endTime: number } {
+		const now = new Date();
+		let startDate: Date;
+		let endDate: Date = new Date(now);
+		endDate.setHours(23, 59, 59, 999);
+
+		if (period === 'today') {
+			startDate = new Date(now);
+			startDate.setHours(0, 0, 0, 0);
+		} else if (period === 'thisWeek') {
+			startDate = new Date(now);
+			const dayOfWeek = startDate.getDay();
+			const daysFromFirstDay = (dayOfWeek - this.settings.firstDayOfWeek + 7) % 7;
+			startDate.setDate(startDate.getDate() - daysFromFirstDay);
+			startDate.setHours(0, 0, 0, 0);
+		} else if (period === 'thisMonth') {
+			startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+			startDate.setHours(0, 0, 0, 0);
+		} else if (period === 'lastWeek') {
+			const firstDayOfWeek = this.settings.firstDayOfWeek;
+			const today = new Date(now);
+			const dayOfWeek = today.getDay();
+			const daysFromFirstDay = (dayOfWeek - firstDayOfWeek + 7) % 7;
+			startDate = new Date(today);
+			startDate.setDate(today.getDate() - daysFromFirstDay - 7);
+			startDate.setHours(0, 0, 0, 0);
+			endDate = new Date(startDate);
+			endDate.setDate(startDate.getDate() + 6);
+			endDate.setHours(23, 59, 59, 999);
+		} else { // lastMonth
+			const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+			startDate = new Date(lastMonth);
+			startDate.setHours(0, 0, 0, 0);
+			endDate = new Date(now.getFullYear(), now.getMonth(), 0);
+			endDate.setHours(23, 59, 59, 999);
+		}
+
+		return { startTime: startDate.getTime(), endTime: endDate.getTime() };
+	}
+
+	/**
+	 * Calculate duration for a note based on settings
+	 */
+	async getNoteButtonDuration(filePath: string): Promise<number> {
+		if (!this.settings.showDurationOnNoteButtons) {
+			return 0;
+		}
+
+		if (this.settings.noteButtonDurationType === 'timePeriod') {
+			// Calculate duration for the specified time period
+			const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+			const { entries } = await this.getCachedOrLoadEntries(filePath);
+			
+			let totalDuration = 0;
+			for (const entry of entries) {
+				if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+					const entryDuration = entry.endTime 
+						? entry.duration 
+						: entry.duration + (Date.now() - entry.startTime);
+					totalDuration += entryDuration;
+				}
+			}
+			return totalDuration;
+		} else {
+			// Calculate duration for project or note
+			const defaultNoteName = this.getDefaultNoteName(filePath);
+			const project = await this.getProjectFromFrontmatter(filePath);
+			
+			// Get the time period for the calculation
+			const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+			
+			let totalDuration = 0;
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			
+			for (const file of markdownFiles) {
+				const currentFilePath = file.path;
+				
+				// Skip excluded folders
+				if (this.isFileExcluded(currentFilePath)) {
+					continue;
+				}
+				
+				if (this.settings.noteButtonGroupBy === 'project') {
+					// Group by project: include all notes with the same project
+					const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
+					if (currentProject === project && project) {
+						const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+						for (const entry of entries) {
+							if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+								const entryDuration = entry.endTime 
+									? entry.duration 
+									: entry.duration + (Date.now() - entry.startTime);
+								totalDuration += entryDuration;
+							}
+						}
+					}
+				} else {
+					// Group by note: include all notes with the same default name (without timestamp)
+					const currentDefaultName = this.getDefaultNoteName(currentFilePath);
+					if (currentDefaultName === defaultNoteName) {
+						// Only count if the current note name (without timestamp) matches the default name
+						// This ensures we only count notes that haven't been renamed from their default
+						const currentFileName = file.basename;
+						const currentNameWithoutTimestamp = this.removeTimestampFromFileName(currentFileName);
+						// The default name is already without timestamp, so compare directly
+						if (currentNameWithoutTimestamp === defaultNoteName) {
+							const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+							for (const entry of entries) {
+								if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+									const entryDuration = entry.endTime 
+										? entry.duration 
+										: entry.duration + (Date.now() - entry.startTime);
+									totalDuration += entryDuration;
+								}
+							}
+						}
+					}
+				}
+			}
+			
+			return totalDuration;
+		}
 	}
 
 	async getMatchingEntries(query: LapseQuery, startTime: number, endTime: number): Promise<Array<{
@@ -1727,7 +2033,7 @@ export default class LapsePlugin extends Plugin {
 		project: string | null;
 		noteName: string;
 		noteTags: string[];
-	}>, groupBy: 'project' | 'date' | 'tag'): Map<string, {
+	}>, groupBy: 'project' | 'date' | 'tag' | 'note'): Map<string, {
 		totalTime: number;
 		entryCount: number;
 		entries: Array<{
@@ -1758,6 +2064,8 @@ export default class LapsePlugin extends Plugin {
 			} else if (groupBy === 'date') {
 				const date = new Date(item.entry.startTime!);
 				groupKey = date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+			} else if (groupBy === 'note') {
+				groupKey = item.noteName || 'Unknown Note';
 			} else { // tag
 				groupKey = item.entry.tags && item.entry.tags.length > 0 ? `#${item.entry.tags[0]}` : 'No Tag';
 			}
@@ -1840,20 +2148,49 @@ export default class LapsePlugin extends Plugin {
 		
 		const thead = table.createEl('thead');
 		const headerRow = thead.createEl('tr');
-		headerRow.createEl('th', { text: this.getGroupByLabel(query.groupBy || 'project') });
-		headerRow.createEl('th', { text: 'Entries' });
-		headerRow.createEl('th', { text: 'Time' });
+		const groupBy = query.groupBy || 'project';
+		
+		// When grouping by note, show individual entries with more columns
+		if (groupBy === 'note') {
+			headerRow.createEl('th', { text: 'Note' });
+			headerRow.createEl('th', { text: 'Label' });
+			headerRow.createEl('th', { text: 'Time' });
+		} else {
+			headerRow.createEl('th', { text: this.getGroupByLabel(groupBy) });
+			headerRow.createEl('th', { text: 'Entries' });
+			headerRow.createEl('th', { text: 'Time' });
+		}
 		
 		const tbody = table.createEl('tbody');
 		
 		// Sort groups by time descending
 		const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
 		
-		for (const [groupName, group] of sortedGroups) {
-			const row = tbody.createEl('tr');
-			row.createEl('td', { text: groupName });
-			row.createEl('td', { text: group.entryCount.toString() });
-			row.createEl('td', { text: this.formatTimeAsHHMMSS(group.totalTime) });
+		if (groupBy === 'note') {
+			// Show individual entries for each note
+			for (const [groupName, group] of sortedGroups) {
+				// Sort entries by start time (newest first)
+				const sortedEntries = [...group.entries].sort((a, b) => (b.entry.startTime || 0) - (a.entry.startTime || 0));
+				
+				for (const entryItem of sortedEntries) {
+					const row = tbody.createEl('tr');
+					row.createEl('td', { text: groupName });
+					row.createEl('td', { text: entryItem.entry.label });
+					
+					const entryDuration = entryItem.entry.endTime 
+						? entryItem.entry.duration 
+						: entryItem.entry.duration + (Date.now() - (entryItem.entry.startTime || 0));
+					row.createEl('td', { text: this.formatTimeAsHHMMSS(entryDuration) });
+				}
+			}
+		} else {
+			// Show grouped summary
+			for (const [groupName, group] of sortedGroups) {
+				const row = tbody.createEl('tr');
+				row.createEl('td', { text: groupName });
+				row.createEl('td', { text: group.entryCount.toString() });
+				row.createEl('td', { text: this.formatTimeAsHHMMSS(group.totalTime) });
+			}
 		}
 		
 		// Render chart if specified
@@ -1872,6 +2209,7 @@ export default class LapsePlugin extends Plugin {
 			case 'project': return 'Project';
 			case 'date': return 'Date';
 			case 'tag': return 'Tag';
+			case 'note': return 'Note';
 			default: return 'Group';
 		}
 	}
@@ -2689,6 +3027,8 @@ class LapseSidebarView extends ItemView {
 	timeDisplays: Map<string, HTMLElement> = new Map(); // Map of entry ID to time display element
 	showTodayEntries: boolean = true; // Toggle for showing/hiding individual entries
 	refreshCounter: number = 0; // Counter for periodic full refreshes
+	showEntriesList: boolean = true; // Toggle for showing/hiding the entries list section
+	showChart: boolean = true; // Toggle for showing/hiding the chart section
 
 	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
 		super(leaf);
@@ -2716,11 +3056,36 @@ class LapseSidebarView extends ItemView {
 		container.empty();
 		this.timeDisplays.clear();
 		
-		// Header with title and refresh button
+		// Header with title and toggle buttons
 		const header = container.createDiv({ cls: 'lapse-sidebar-header' });
 		header.createEl('h4', { text: 'Activity' });
 		
-		const refreshBtn = header.createEl('button', { 
+		const headerButtons = header.createDiv({ cls: 'lapse-sidebar-header-buttons' });
+		
+		// List toggle button
+		const listBtn = headerButtons.createEl('button', { 
+			cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showEntriesList ? 'active' : ''}`,
+			attr: { 'aria-label': 'Toggle entries list' }
+		});
+		setIcon(listBtn, 'list');
+		listBtn.onclick = () => {
+			this.showEntriesList = !this.showEntriesList;
+			this.render();
+		};
+		
+		// Chart toggle button
+		const chartBtn = headerButtons.createEl('button', { 
+			cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showChart ? 'active' : ''}`,
+			attr: { 'aria-label': 'Toggle chart' }
+		});
+		setIcon(chartBtn, 'pie-chart');
+		chartBtn.onclick = () => {
+			this.showChart = !this.showChart;
+			this.render();
+		};
+		
+		// Refresh button
+		const refreshBtn = headerButtons.createEl('button', { 
 			cls: 'lapse-sidebar-refresh-btn clickable-icon',
 			attr: { 'aria-label': 'Refresh' }
 		});
@@ -2785,6 +3150,15 @@ class LapseSidebarView extends ItemView {
 					}
 				};
 				
+				// Show duration on note button if enabled
+				if (this.plugin.settings.showDurationOnNoteButtons) {
+					const duration = await this.plugin.getNoteButtonDuration(filePath);
+					if (duration > 0) {
+						const durationText = this.plugin.formatTimeAsHHMMSS(duration);
+						link.setText(`${fileName} (${durationText})`);
+					}
+				}
+				
 				// Get project from frontmatter
 				const project = await this.plugin.getProjectFromFrontmatter(filePath);
 				
@@ -2798,10 +3172,11 @@ class LapseSidebarView extends ItemView {
 			}
 		}
 
-		// Get today's entries and group by note
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
-		const todayStart = today.getTime();
+		// Get today's entries and group by note (only if entries list is visible)
+		if (this.showEntriesList) {
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStart = today.getTime();
 		
 		const todayEntries: Array<{ filePath: string; entry: TimeEntry; startTime: number }> = [];
 		
@@ -2913,6 +3288,15 @@ class LapseSidebarView extends ItemView {
 					}
 				};
 				
+				// Show duration on note button if enabled
+				if (this.plugin.settings.showDurationOnNoteButtons) {
+					const duration = await this.plugin.getNoteButtonDuration(filePath);
+					if (duration > 0) {
+						const durationText = this.plugin.formatTimeAsHHMMSS(duration);
+						link.setText(`${fileName} (${durationText})`);
+					}
+				}
+				
 				// Total time tracked on the right
 				const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
 				topLine.createSpan({ text: timeText, cls: 'lapse-sidebar-time' });
@@ -2938,9 +3322,15 @@ class LapseSidebarView extends ItemView {
 				}
 			}
 		}
+		}
 
-		// Add pie chart section at the bottom
-		await this.renderPieChart(container as HTMLElement, todayStart);
+		// Add pie chart section at the bottom (only if chart is visible)
+		if (this.showChart) {
+			const today = new Date();
+			today.setHours(0, 0, 0, 0);
+			const todayStart = today.getTime();
+			await this.renderPieChart(container as HTMLElement, todayStart);
+		}
 
 		// Set up refresh interval - always run to detect new timers
 		// Clear any existing interval first
@@ -3604,6 +3994,83 @@ class LapseSettingTab extends PluginSettingTab {
 						}
 					}
 				}));
+
+		new Setting(containerEl)
+			.setName('Show duration on note buttons')
+			.setDesc('Display task duration on note links in the Activity sidebar')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.showDurationOnNoteButtons)
+				.onChange(async (value) => {
+					this.plugin.settings.showDurationOnNoteButtons = value;
+					await this.plugin.saveSettings();
+					// Refresh sidebar to update note buttons
+					this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
+						if (leaf.view instanceof LapseSidebarView) {
+							leaf.view.refresh();
+						}
+					});
+				}));
+
+		if (this.plugin.settings.showDurationOnNoteButtons) {
+			new Setting(containerEl)
+				.setName('Duration type')
+				.setDesc('Choose how to calculate duration: time period or project/note aggregate')
+				.addDropdown(dropdown => dropdown
+					.addOption('timePeriod', 'Time Period')
+					.addOption('projectOrNote', 'Project or Note')
+					.setValue(this.plugin.settings.noteButtonDurationType)
+					.onChange(async (value) => {
+						this.plugin.settings.noteButtonDurationType = value as 'timePeriod' | 'projectOrNote';
+						await this.plugin.saveSettings();
+						// Refresh sidebar to update note buttons
+						this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
+							if (leaf.view instanceof LapseSidebarView) {
+								leaf.view.refresh();
+							}
+						});
+					}));
+
+			new Setting(containerEl)
+				.setName('Time period')
+				.setDesc('Select the time period for duration calculation')
+				.addDropdown(dropdown => dropdown
+					.addOption('today', 'Today')
+					.addOption('thisWeek', 'This Week')
+					.addOption('thisMonth', 'This Month')
+					.addOption('lastWeek', 'Last Week')
+					.addOption('lastMonth', 'Last Month')
+					.setValue(this.plugin.settings.noteButtonTimePeriod)
+					.onChange(async (value) => {
+						this.plugin.settings.noteButtonTimePeriod = value as 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth';
+						await this.plugin.saveSettings();
+						// Refresh sidebar to update note buttons
+						this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
+							if (leaf.view instanceof LapseSidebarView) {
+								leaf.view.refresh();
+							}
+						});
+					}));
+
+			if (this.plugin.settings.noteButtonDurationType === 'projectOrNote') {
+				new Setting(containerEl)
+					.setName('Group by')
+					.setDesc('Show aggregate time for project (all notes with same project) or note (all notes with same default name)')
+					.addDropdown(dropdown => dropdown
+						.addOption('project', 'Project')
+						.addOption('note', 'Note')
+						.setValue(this.plugin.settings.noteButtonGroupBy)
+						.onChange(async (value) => {
+							this.plugin.settings.noteButtonGroupBy = value as 'project' | 'note';
+							await this.plugin.saveSettings();
+							// Refresh sidebar to update note buttons
+							this.app.workspace.getLeavesOfType('lapse-sidebar').forEach(leaf => {
+								if (leaf.view instanceof LapseSidebarView) {
+									leaf.view.refresh();
+								}
+							});
+						}));
+			}
+		}
 
 		new Setting(containerEl)
 			.setName('First day of week')

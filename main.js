@@ -50,8 +50,19 @@ var DEFAULT_SETTINGS = {
   // No folders excluded by default
   showStatusBar: true,
   // Show active timers in status bar by default
+<<<<<<< HEAD
   lapseButtonTemplatesFolder: "Templates/Lapse Buttons"
   // Default folder for lapse button templates
+=======
+  showDurationOnNoteButtons: false,
+  // Don't show duration on note buttons by default
+  noteButtonDurationType: "timePeriod",
+  // Default to time period
+  noteButtonTimePeriod: "today",
+  // Default to today
+  noteButtonGroupBy: "note"
+  // Default to note
+>>>>>>> 57ec66d (in progress: settings updates)
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -91,6 +102,7 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     );
     this.registerMarkdownCodeBlockProcessor("lapse", this.processTimerCodeBlock.bind(this));
     this.registerMarkdownCodeBlockProcessor("lapse-report", this.processReportCodeBlock.bind(this));
+<<<<<<< HEAD
     this.registerMarkdownPostProcessor((el, ctx) => {
       const codeElements = el.querySelectorAll("code");
       codeElements.forEach((codeEl) => {
@@ -101,6 +113,9 @@ var LapsePlugin = class extends import_obsidian.Plugin {
         }
       });
     });
+=======
+    this.registerMarkdownCodeBlockProcessor("lapse-active", this.processActiveTimersCodeBlock.bind(this));
+>>>>>>> 57ec66d (in progress: settings updates)
     this.registerView(
       "lapse-sidebar",
       (leaf) => new LapseSidebarView(leaf, this)
@@ -1036,6 +1051,108 @@ ${content}`;
       await this.renderReportTable(container, groupedData, query);
     }
   }
+  async processActiveTimersCodeBlock(source, el, ctx) {
+    const container = el.createDiv({ cls: "lapse-active-container" });
+    const renderActiveTimers = async () => {
+      container.empty();
+      const activeTimers = [];
+      const currentFile = this.app.workspace.getActiveFile();
+      if (currentFile) {
+        const currentFilePath = currentFile.path;
+        await this.loadEntriesFromFrontmatter(currentFilePath);
+        const currentPageData = this.timeData.get(currentFilePath);
+        if (currentPageData) {
+          currentPageData.entries.forEach((entry) => {
+            if (entry.startTime && !entry.endTime) {
+              activeTimers.push({ filePath: currentFilePath, entry });
+            }
+          });
+        }
+      }
+      this.timeData.forEach((pageData, filePath) => {
+        if (currentFile && filePath === currentFile.path) {
+          return;
+        }
+        pageData.entries.forEach((entry) => {
+          if (entry.startTime && !entry.endTime) {
+            activeTimers.push({ filePath, entry });
+          }
+        });
+      });
+      const markdownFiles = this.app.vault.getMarkdownFiles();
+      for (const file of markdownFiles) {
+        const filePath = file.path;
+        if (this.isFileExcluded(filePath)) {
+          continue;
+        }
+        if (this.timeData.has(filePath)) {
+          continue;
+        }
+        const { entries } = await this.getCachedOrLoadEntries(filePath);
+        entries.forEach((entry) => {
+          if (entry.startTime && !entry.endTime) {
+            activeTimers.push({ filePath, entry });
+          }
+        });
+      }
+      if (activeTimers.length === 0) {
+        container.createEl("p", { text: "No active timers", cls: "lapse-active-empty" });
+        return;
+      }
+      for (const { filePath, entry } of activeTimers) {
+        const row = container.createDiv({ cls: "lapse-active-row" });
+        const elapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
+        const timeText = this.formatTimeAsHHMMSS(elapsed);
+        const timeDisplay = row.createDiv({
+          text: timeText,
+          cls: "lapse-active-time"
+        });
+        const labelDisplay = row.createDiv({
+          text: entry.label,
+          cls: "lapse-active-label"
+        });
+        const actionsContainer = row.createDiv({ cls: "lapse-active-actions" });
+        const jumpBtn = actionsContainer.createEl("button", {
+          cls: "lapse-active-btn lapse-active-btn-jump",
+          attr: { "aria-label": "Jump to note" }
+        });
+        (0, import_obsidian.setIcon)(jumpBtn, "arrow-right");
+        jumpBtn.onclick = async () => {
+          await this.app.workspace.openLinkText(filePath, "", true);
+        };
+        const stopBtn = actionsContainer.createEl("button", {
+          cls: "lapse-active-btn lapse-active-btn-stop",
+          attr: { "aria-label": "Stop timer" }
+        });
+        (0, import_obsidian.setIcon)(stopBtn, "square");
+        stopBtn.onclick = async (e) => {
+          e.stopPropagation();
+          entry.endTime = Date.now();
+          entry.duration += Date.now() - entry.startTime;
+          entry.startTime = null;
+          await this.updateFrontmatter(filePath);
+          await renderActiveTimers();
+        };
+        const intervalId = window.setInterval(() => {
+          if (entry.startTime && !entry.endTime) {
+            const newElapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
+            timeDisplay.setText(this.formatTimeAsHHMMSS(newElapsed));
+          } else {
+            window.clearInterval(intervalId);
+          }
+        }, 1e3);
+      }
+    };
+    await renderActiveTimers();
+    const refreshInterval = window.setInterval(async () => {
+      await renderActiveTimers();
+    }, 5e3);
+    ctx.addChild({
+      unload: () => {
+        window.clearInterval(refreshInterval);
+      }
+    });
+  }
   parseQuery(source) {
     const query = {
       display: "table",
@@ -1081,7 +1198,7 @@ ${content}`;
           }
           break;
         case "group-by":
-          if (["project", "date", "tag"].includes(value.toLowerCase())) {
+          if (["project", "date", "tag", "note"].includes(value.toLowerCase())) {
             query.groupBy = value.toLowerCase();
           }
           break;
@@ -1166,6 +1283,118 @@ ${content}`;
     }
     return { startTime, endTime };
   }
+  /**
+   * Get the default note name (without timestamp) for a given file path
+   */
+  getDefaultNoteName(filePath) {
+    var _a;
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (file && file instanceof import_obsidian.TFile) {
+      return this.removeTimestampFromFileName(file.basename);
+    }
+    const fileName = ((_a = filePath.split("/").pop()) == null ? void 0 : _a.replace(".md", "")) || filePath;
+    return this.removeTimestampFromFileName(fileName);
+  }
+  /**
+   * Get date range for a time period
+   */
+  getDateRangeForPeriod(period) {
+    const now = new Date();
+    let startDate;
+    let endDate = new Date(now);
+    endDate.setHours(23, 59, 59, 999);
+    if (period === "today") {
+      startDate = new Date(now);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (period === "thisWeek") {
+      startDate = new Date(now);
+      const dayOfWeek = startDate.getDay();
+      const daysFromFirstDay = (dayOfWeek - this.settings.firstDayOfWeek + 7) % 7;
+      startDate.setDate(startDate.getDate() - daysFromFirstDay);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (period === "thisMonth") {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (period === "lastWeek") {
+      const firstDayOfWeek = this.settings.firstDayOfWeek;
+      const today = new Date(now);
+      const dayOfWeek = today.getDay();
+      const daysFromFirstDay = (dayOfWeek - firstDayOfWeek + 7) % 7;
+      startDate = new Date(today);
+      startDate.setDate(today.getDate() - daysFromFirstDay - 7);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+    } else {
+      const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      startDate = new Date(lastMonth);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = new Date(now.getFullYear(), now.getMonth(), 0);
+      endDate.setHours(23, 59, 59, 999);
+    }
+    return { startTime: startDate.getTime(), endTime: endDate.getTime() };
+  }
+  /**
+   * Calculate duration for a note based on settings
+   */
+  async getNoteButtonDuration(filePath) {
+    if (!this.settings.showDurationOnNoteButtons) {
+      return 0;
+    }
+    if (this.settings.noteButtonDurationType === "timePeriod") {
+      const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+      const { entries } = await this.getCachedOrLoadEntries(filePath);
+      let totalDuration = 0;
+      for (const entry of entries) {
+        if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+          const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
+          totalDuration += entryDuration;
+        }
+      }
+      return totalDuration;
+    } else {
+      const defaultNoteName = this.getDefaultNoteName(filePath);
+      const project = await this.getProjectFromFrontmatter(filePath);
+      const { startTime, endTime } = this.getDateRangeForPeriod(this.settings.noteButtonTimePeriod);
+      let totalDuration = 0;
+      const markdownFiles = this.app.vault.getMarkdownFiles();
+      for (const file of markdownFiles) {
+        const currentFilePath = file.path;
+        if (this.isFileExcluded(currentFilePath)) {
+          continue;
+        }
+        if (this.settings.noteButtonGroupBy === "project") {
+          const currentProject = await this.getProjectFromFrontmatter(currentFilePath);
+          if (currentProject === project && project) {
+            const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+            for (const entry of entries) {
+              if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+                const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
+                totalDuration += entryDuration;
+              }
+            }
+          }
+        } else {
+          const currentDefaultName = this.getDefaultNoteName(currentFilePath);
+          if (currentDefaultName === defaultNoteName) {
+            const currentFileName = file.basename;
+            const currentNameWithoutTimestamp = this.removeTimestampFromFileName(currentFileName);
+            if (currentNameWithoutTimestamp === defaultNoteName) {
+              const { entries } = await this.getCachedOrLoadEntries(currentFilePath);
+              for (const entry of entries) {
+                if (entry.startTime && entry.startTime >= startTime && entry.startTime <= endTime) {
+                  const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
+                  totalDuration += entryDuration;
+                }
+              }
+            }
+          }
+        }
+      }
+      return totalDuration;
+    }
+  }
   async getMatchingEntries(query, startTime, endTime) {
     const matchedEntries = [];
     const markdownFiles = this.app.vault.getMarkdownFiles();
@@ -1247,6 +1476,8 @@ ${content}`;
       } else if (groupBy === "date") {
         const date = new Date(item.entry.startTime);
         groupKey = date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      } else if (groupBy === "note") {
+        groupKey = item.noteName || "Unknown Note";
       } else {
         groupKey = item.entry.tags && item.entry.tags.length > 0 ? `#${item.entry.tags[0]}` : "No Tag";
       }
@@ -1303,16 +1534,36 @@ ${content}`;
     const table = tableContainer.createEl("table", { cls: "lapse-reports-table" });
     const thead = table.createEl("thead");
     const headerRow = thead.createEl("tr");
-    headerRow.createEl("th", { text: this.getGroupByLabel(query.groupBy || "project") });
-    headerRow.createEl("th", { text: "Entries" });
-    headerRow.createEl("th", { text: "Time" });
+    const groupBy = query.groupBy || "project";
+    if (groupBy === "note") {
+      headerRow.createEl("th", { text: "Note" });
+      headerRow.createEl("th", { text: "Label" });
+      headerRow.createEl("th", { text: "Time" });
+    } else {
+      headerRow.createEl("th", { text: this.getGroupByLabel(groupBy) });
+      headerRow.createEl("th", { text: "Entries" });
+      headerRow.createEl("th", { text: "Time" });
+    }
     const tbody = table.createEl("tbody");
     const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
-    for (const [groupName, group] of sortedGroups) {
-      const row = tbody.createEl("tr");
-      row.createEl("td", { text: groupName });
-      row.createEl("td", { text: group.entryCount.toString() });
-      row.createEl("td", { text: this.formatTimeAsHHMMSS(group.totalTime) });
+    if (groupBy === "note") {
+      for (const [groupName, group] of sortedGroups) {
+        const sortedEntries = [...group.entries].sort((a, b) => (b.entry.startTime || 0) - (a.entry.startTime || 0));
+        for (const entryItem of sortedEntries) {
+          const row = tbody.createEl("tr");
+          row.createEl("td", { text: groupName });
+          row.createEl("td", { text: entryItem.entry.label });
+          const entryDuration = entryItem.entry.endTime ? entryItem.entry.duration : entryItem.entry.duration + (Date.now() - (entryItem.entry.startTime || 0));
+          row.createEl("td", { text: this.formatTimeAsHHMMSS(entryDuration) });
+        }
+      }
+    } else {
+      for (const [groupName, group] of sortedGroups) {
+        const row = tbody.createEl("tr");
+        row.createEl("td", { text: groupName });
+        row.createEl("td", { text: group.entryCount.toString() });
+        row.createEl("td", { text: this.formatTimeAsHHMMSS(group.totalTime) });
+      }
     }
     if (query.chart && query.chart !== "none" && sortedGroups.length > 0) {
       const chartContainer = container.createDiv({ cls: "lapse-report-chart-container" });
@@ -1331,6 +1582,8 @@ ${content}`;
         return "Date";
       case "tag":
         return "Tag";
+      case "note":
+        return "Note";
       default:
         return "Group";
     }
@@ -1962,7 +2215,7 @@ ${content}`;
   }
 };
 var LapseSidebarView = class extends import_obsidian.ItemView {
-  // Counter for periodic full refreshes
+  // Toggle for showing/hiding the chart section
   constructor(leaf, plugin) {
     super(leaf);
     this.refreshInterval = null;
@@ -1971,6 +2224,10 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     this.showTodayEntries = true;
     // Toggle for showing/hiding individual entries
     this.refreshCounter = 0;
+    // Counter for periodic full refreshes
+    this.showEntriesList = true;
+    // Toggle for showing/hiding the entries list section
+    this.showChart = true;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1992,7 +2249,26 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     this.timeDisplays.clear();
     const header = container.createDiv({ cls: "lapse-sidebar-header" });
     header.createEl("h4", { text: "Activity" });
-    const refreshBtn = header.createEl("button", {
+    const headerButtons = header.createDiv({ cls: "lapse-sidebar-header-buttons" });
+    const listBtn = headerButtons.createEl("button", {
+      cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showEntriesList ? "active" : ""}`,
+      attr: { "aria-label": "Toggle entries list" }
+    });
+    (0, import_obsidian.setIcon)(listBtn, "list");
+    listBtn.onclick = () => {
+      this.showEntriesList = !this.showEntriesList;
+      this.render();
+    };
+    const chartBtn = headerButtons.createEl("button", {
+      cls: `lapse-sidebar-toggle-view-btn clickable-icon ${this.showChart ? "active" : ""}`,
+      attr: { "aria-label": "Toggle chart" }
+    });
+    (0, import_obsidian.setIcon)(chartBtn, "pie-chart");
+    chartBtn.onclick = () => {
+      this.showChart = !this.showChart;
+      this.render();
+    };
+    const refreshBtn = headerButtons.createEl("button", {
       cls: "lapse-sidebar-refresh-btn clickable-icon",
       attr: { "aria-label": "Refresh" }
     });
@@ -2039,6 +2315,13 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
             this.app.workspace.openLinkText(filePath, "", false);
           }
         };
+        if (this.plugin.settings.showDurationOnNoteButtons) {
+          const duration = await this.plugin.getNoteButtonDuration(filePath);
+          if (duration > 0) {
+            const durationText = this.plugin.formatTimeAsHHMMSS(duration);
+            link.setText(`${fileName} (${durationText})`);
+          }
+        }
         const project = await this.plugin.getProjectFromFrontmatter(filePath);
         if (project) {
           detailsContainer.createDiv({ text: project, cls: "lapse-activity-project" });
@@ -2046,101 +2329,115 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
         detailsContainer.createDiv({ text: entry.label, cls: "lapse-activity-label" });
       }
     }
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayStart = today.getTime();
-    const todayEntries = [];
-    this.plugin.timeData.forEach((pageData, filePath) => {
-      pageData.entries.forEach((entry) => {
-        if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
-          todayEntries.push({ filePath, entry, startTime: entry.startTime });
-        }
-      });
-    });
-    const markdownFiles = this.app.vault.getMarkdownFiles();
-    for (const file of markdownFiles) {
-      const filePath = file.path;
-      if (this.plugin.isFileExcluded(filePath)) {
-        continue;
-      }
-      if (this.plugin.timeData.has(filePath)) {
-        continue;
-      }
-      const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
-      for (const entry of fileEntries) {
-        if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
-          todayEntries.push({ filePath, entry, startTime: entry.startTime });
-        }
-      }
-    }
-    const entriesByNote = /* @__PURE__ */ new Map();
-    todayEntries.forEach(({ filePath, entry, startTime }) => {
-      if (!entriesByNote.has(filePath)) {
-        entriesByNote.set(filePath, []);
-      }
-      entriesByNote.get(filePath).push({ entry, startTime });
-    });
-    entriesByNote.forEach((entries) => {
-      entries.sort((a, b) => b.startTime - a.startTime);
-    });
-    const noteGroups = Array.from(entriesByNote.entries()).map(([filePath, entries]) => {
-      const totalTime = entries.reduce((sum, { entry }) => sum + entry.duration, 0);
-      const newestStartTime = Math.max(...entries.map((e) => e.startTime));
-      return { filePath, entries, totalTime, newestStartTime };
-    });
-    noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
-    if (noteGroups.length > 0) {
-      const sectionHeader = container.createDiv({ cls: "lapse-sidebar-section-header" });
-      sectionHeader.createEl("h4", { text: "Today's Entries", cls: "lapse-sidebar-section-title" });
-      const toggleBtn = sectionHeader.createEl("button", {
-        cls: "lapse-sidebar-toggle-btn clickable-icon",
-        attr: { "aria-label": this.showTodayEntries ? "Hide entries" : "Show entries" }
-      });
-      (0, import_obsidian.setIcon)(toggleBtn, this.showTodayEntries ? "chevron-down" : "chevron-right");
-      toggleBtn.onclick = () => {
-        this.showTodayEntries = !this.showTodayEntries;
-        this.render();
-      };
-      const todayList = container.createEl("ul", { cls: "lapse-sidebar-list" });
-      for (const { filePath, entries, totalTime } of noteGroups) {
-        const item = todayList.createEl("li", { cls: "lapse-sidebar-note-group" });
-        const topLine = item.createDiv({ cls: "lapse-sidebar-top-line" });
-        const file = this.app.vault.getAbstractFileByPath(filePath);
-        let fileName = file && file instanceof import_obsidian.TFile ? file.basename : ((_b = filePath.split("/").pop()) == null ? void 0 : _b.replace(".md", "")) || filePath;
-        if (this.plugin.settings.hideTimestampsInViews) {
-          fileName = this.plugin.removeTimestampFromFileName(fileName);
-        }
-        const link = topLine.createEl("a", {
-          text: fileName,
-          cls: "internal-link",
-          href: filePath
-        });
-        link.onclick = (e) => {
-          e.preventDefault();
-          const file2 = this.app.vault.getAbstractFileByPath(filePath);
-          if (file2 && file2 instanceof import_obsidian.TFile) {
-            this.app.workspace.openLinkText(filePath, "", false);
+    if (this.showEntriesList) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStart = today.getTime();
+      const todayEntries = [];
+      this.plugin.timeData.forEach((pageData, filePath) => {
+        pageData.entries.forEach((entry) => {
+          if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+            todayEntries.push({ filePath, entry, startTime: entry.startTime });
           }
-        };
-        const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
-        topLine.createSpan({ text: timeText, cls: "lapse-sidebar-time" });
-        const project = await this.plugin.getProjectFromFrontmatter(filePath);
-        if (project) {
-          const secondLine = item.createDiv({ cls: "lapse-sidebar-second-line" });
-          secondLine.createSpan({ text: project, cls: "lapse-sidebar-project" });
+        });
+      });
+      const markdownFiles = this.app.vault.getMarkdownFiles();
+      for (const file of markdownFiles) {
+        const filePath = file.path;
+        if (this.plugin.isFileExcluded(filePath)) {
+          continue;
         }
-        if (this.showTodayEntries) {
-          const entriesList = item.createDiv({ cls: "lapse-sidebar-entries-list" });
-          entries.forEach(({ entry }) => {
-            const entryLine = entriesList.createDiv({ cls: "lapse-sidebar-entry-line" });
-            const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
-            entryLine.createSpan({ text: entry.label, cls: "lapse-sidebar-entry-label" });
-            entryLine.createSpan({ text: entryTime, cls: "lapse-sidebar-entry-time" });
+        if (this.plugin.timeData.has(filePath)) {
+          continue;
+        }
+        const { entries: fileEntries } = await this.plugin.getCachedOrLoadEntries(filePath);
+        for (const entry of fileEntries) {
+          if (entry.startTime && entry.startTime >= todayStart && entry.endTime) {
+            todayEntries.push({ filePath, entry, startTime: entry.startTime });
+          }
+        }
+      }
+      const entriesByNote = /* @__PURE__ */ new Map();
+      todayEntries.forEach(({ filePath, entry, startTime }) => {
+        if (!entriesByNote.has(filePath)) {
+          entriesByNote.set(filePath, []);
+        }
+        entriesByNote.get(filePath).push({ entry, startTime });
+      });
+      entriesByNote.forEach((entries) => {
+        entries.sort((a, b) => b.startTime - a.startTime);
+      });
+      const noteGroups = Array.from(entriesByNote.entries()).map(([filePath, entries]) => {
+        const totalTime = entries.reduce((sum, { entry }) => sum + entry.duration, 0);
+        const newestStartTime = Math.max(...entries.map((e) => e.startTime));
+        return { filePath, entries, totalTime, newestStartTime };
+      });
+      noteGroups.sort((a, b) => b.newestStartTime - a.newestStartTime);
+      if (noteGroups.length > 0) {
+        const sectionHeader = container.createDiv({ cls: "lapse-sidebar-section-header" });
+        sectionHeader.createEl("h4", { text: "Today's Entries", cls: "lapse-sidebar-section-title" });
+        const toggleBtn = sectionHeader.createEl("button", {
+          cls: "lapse-sidebar-toggle-btn clickable-icon",
+          attr: { "aria-label": this.showTodayEntries ? "Hide entries" : "Show entries" }
+        });
+        (0, import_obsidian.setIcon)(toggleBtn, this.showTodayEntries ? "chevron-down" : "chevron-right");
+        toggleBtn.onclick = () => {
+          this.showTodayEntries = !this.showTodayEntries;
+          this.render();
+        };
+        const todayList = container.createEl("ul", { cls: "lapse-sidebar-list" });
+        for (const { filePath, entries, totalTime } of noteGroups) {
+          const item = todayList.createEl("li", { cls: "lapse-sidebar-note-group" });
+          const topLine = item.createDiv({ cls: "lapse-sidebar-top-line" });
+          const file = this.app.vault.getAbstractFileByPath(filePath);
+          let fileName = file && file instanceof import_obsidian.TFile ? file.basename : ((_b = filePath.split("/").pop()) == null ? void 0 : _b.replace(".md", "")) || filePath;
+          if (this.plugin.settings.hideTimestampsInViews) {
+            fileName = this.plugin.removeTimestampFromFileName(fileName);
+          }
+          const link = topLine.createEl("a", {
+            text: fileName,
+            cls: "internal-link",
+            href: filePath
           });
+          link.onclick = (e) => {
+            e.preventDefault();
+            const file2 = this.app.vault.getAbstractFileByPath(filePath);
+            if (file2 && file2 instanceof import_obsidian.TFile) {
+              this.app.workspace.openLinkText(filePath, "", false);
+            }
+          };
+          if (this.plugin.settings.showDurationOnNoteButtons) {
+            const duration = await this.plugin.getNoteButtonDuration(filePath);
+            if (duration > 0) {
+              const durationText = this.plugin.formatTimeAsHHMMSS(duration);
+              link.setText(`${fileName} (${durationText})`);
+            }
+          }
+          const timeText = this.plugin.formatTimeAsHHMMSS(totalTime);
+          topLine.createSpan({ text: timeText, cls: "lapse-sidebar-time" });
+          const project = await this.plugin.getProjectFromFrontmatter(filePath);
+          if (project) {
+            const secondLine = item.createDiv({ cls: "lapse-sidebar-second-line" });
+            secondLine.createSpan({ text: project, cls: "lapse-sidebar-project" });
+          }
+          if (this.showTodayEntries) {
+            const entriesList = item.createDiv({ cls: "lapse-sidebar-entries-list" });
+            entries.forEach(({ entry }) => {
+              const entryLine = entriesList.createDiv({ cls: "lapse-sidebar-entry-line" });
+              const entryTime = this.plugin.formatTimeAsHHMMSS(entry.duration);
+              entryLine.createSpan({ text: entry.label, cls: "lapse-sidebar-entry-label" });
+              entryLine.createSpan({ text: entryTime, cls: "lapse-sidebar-entry-time" });
+            });
+          }
         }
       }
     }
-    await this.renderPieChart(container, todayStart);
+    if (this.showChart) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStart = today.getTime();
+      await this.renderPieChart(container, todayStart);
+    }
     if (this.refreshInterval) {
       clearInterval(this.refreshInterval);
     }
@@ -2583,6 +2880,46 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       }
     }));
+    new import_obsidian.Setting(containerEl).setName("Show duration on note buttons").setDesc("Display task duration on note links in the Activity sidebar").addToggle((toggle) => toggle.setValue(this.plugin.settings.showDurationOnNoteButtons).onChange(async (value) => {
+      this.plugin.settings.showDurationOnNoteButtons = value;
+      await this.plugin.saveSettings();
+      this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
+        if (leaf.view instanceof LapseSidebarView) {
+          leaf.view.refresh();
+        }
+      });
+    }));
+    if (this.plugin.settings.showDurationOnNoteButtons) {
+      new import_obsidian.Setting(containerEl).setName("Duration type").setDesc("Choose how to calculate duration: time period or project/note aggregate").addDropdown((dropdown) => dropdown.addOption("timePeriod", "Time Period").addOption("projectOrNote", "Project or Note").setValue(this.plugin.settings.noteButtonDurationType).onChange(async (value) => {
+        this.plugin.settings.noteButtonDurationType = value;
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
+          if (leaf.view instanceof LapseSidebarView) {
+            leaf.view.refresh();
+          }
+        });
+      }));
+      new import_obsidian.Setting(containerEl).setName("Time period").setDesc("Select the time period for duration calculation").addDropdown((dropdown) => dropdown.addOption("today", "Today").addOption("thisWeek", "This Week").addOption("thisMonth", "This Month").addOption("lastWeek", "Last Week").addOption("lastMonth", "Last Month").setValue(this.plugin.settings.noteButtonTimePeriod).onChange(async (value) => {
+        this.plugin.settings.noteButtonTimePeriod = value;
+        await this.plugin.saveSettings();
+        this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
+          if (leaf.view instanceof LapseSidebarView) {
+            leaf.view.refresh();
+          }
+        });
+      }));
+      if (this.plugin.settings.noteButtonDurationType === "projectOrNote") {
+        new import_obsidian.Setting(containerEl).setName("Group by").setDesc("Show aggregate time for project (all notes with same project) or note (all notes with same default name)").addDropdown((dropdown) => dropdown.addOption("project", "Project").addOption("note", "Note").setValue(this.plugin.settings.noteButtonGroupBy).onChange(async (value) => {
+          this.plugin.settings.noteButtonGroupBy = value;
+          await this.plugin.saveSettings();
+          this.app.workspace.getLeavesOfType("lapse-sidebar").forEach((leaf) => {
+            if (leaf.view instanceof LapseSidebarView) {
+              leaf.view.refresh();
+            }
+          });
+        }));
+      }
+    }
     new import_obsidian.Setting(containerEl).setName("First day of week").setDesc("Set the first day of the week for weekly reports").addDropdown((dropdown) => dropdown.addOption("0", "Sunday").addOption("1", "Monday").addOption("2", "Tuesday").addOption("3", "Wednesday").addOption("4", "Thursday").addOption("5", "Friday").addOption("6", "Saturday").setValue(this.plugin.settings.firstDayOfWeek.toString()).onChange(async (value) => {
       this.plugin.settings.firstDayOfWeek = parseInt(value);
       await this.plugin.saveSettings();
