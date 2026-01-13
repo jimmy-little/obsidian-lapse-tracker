@@ -530,18 +530,51 @@ export default class LapsePlugin extends Plugin {
 						const durationStr = trimmed.replace(/duration:\s*/, '').trim();
 						currentEntry.duration = parseInt(durationStr) || 0;
 					} else if (trimmed.startsWith('tags:') && currentEntry) {
-						// Parse tags - can be array or comma-separated
+						// Parse tags - can be inline array, comma-separated, or multiline array
 						const tagsStr = trimmed.replace(/tags:\s*/, '').trim();
 						if (tagsStr.startsWith('[')) {
-							// Array format: tags: [tag1, tag2]
+							// Inline array format: tags: ["tag1", "tag2"]
 							try {
 								currentEntry.tags = JSON.parse(tagsStr);
 							} catch {
 								currentEntry.tags = [];
 							}
-						} else {
-							// Comma-separated or single tag
+						} else if (tagsStr) {
+							// Comma-separated or single tag on same line
 							currentEntry.tags = tagsStr.split(',').map(t => t.trim()).filter(t => t);
+						} else {
+							// Empty on this line, check next lines for multiline YAML array
+							// Format:
+							// tags:
+							//   - tag1
+							//   - tag2
+							currentEntry.tags = [];
+							let j = i + 1;
+							while (j < lines.length) {
+								const nextLine = lines[j];
+								const nextTrimmed = nextLine.trim();
+								const nextIndent = nextLine.length - nextLine.trimStart().length;
+								
+								// Check if this is an array item under tags (should have more indent than 'tags:')
+								if (nextTrimmed.startsWith('-') && nextIndent > indent) {
+									// Extract the tag value after the dash
+									const tagValue = nextTrimmed.substring(1).trim();
+									// Remove quotes if present
+									const cleanTag = tagValue.replace(/^["'](.*)["']$/, '$1');
+									if (cleanTag) {
+										currentEntry.tags.push(cleanTag);
+									}
+									j++;
+								} else if (nextTrimmed === '') {
+									// Skip empty lines within the array
+									j++;
+								} else {
+									// Hit a non-array line, stop parsing tags
+									break;
+								}
+							}
+							// Update i to skip the lines we've already processed
+							i = j - 1;
 						}
 					}
 				}
@@ -1094,8 +1127,8 @@ export default class LapsePlugin extends Plugin {
 						// Remove quotes if present
 						value = value.replace(/^["']+|["']+$/g, '');
 						
-						// Validate it looks like a color (hex or named color)
-						if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/)) {
+						// Validate it looks like a color (hex, named color, or CSS variable)
+						if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/) || value.match(/^var\(/)) {
 							return value;
 						}
 					}
@@ -1653,16 +1686,28 @@ export default class LapsePlugin extends Plugin {
 				setIcon(stopBtn, 'square');
 				stopBtn.onclick = async (e) => {
 					e.stopPropagation();
-					// Stop the timer
-					entry.endTime = Date.now();
-					entry.duration += (Date.now() - entry.startTime!);
-					entry.startTime = null;
 					
-					// Update frontmatter in the background
-					await this.updateFrontmatter(filePath);
-					
-					// Re-render to update the list
-					await renderActiveTimers();
+					// Find the entry in timeData and update it
+					const pageData = this.timeData.get(filePath);
+					if (pageData) {
+						const entryInData = pageData.entries.find(e => e.id === entry.id);
+						if (entryInData && entryInData.startTime && !entryInData.endTime) {
+							// Stop the timer
+							const now = Date.now();
+							entryInData.endTime = now;
+							entryInData.duration += (now - entryInData.startTime);
+							entryInData.startTime = null;
+							
+							// Update total time
+							pageData.totalTimeTracked = pageData.entries.reduce((sum, e) => sum + e.duration, 0);
+							
+							// Update frontmatter in the background
+							await this.updateFrontmatter(filePath);
+							
+							// Re-render to update the list
+							await renderActiveTimers();
+						}
+					}
 				};
 				
 				// Update elapsed time every second
@@ -1683,50 +1728,49 @@ export default class LapsePlugin extends Plugin {
 			}
 		};
 		
-		// Function to update timers without full re-render
-		const updateTimers = async () => {
-			const activeTimers = await getActiveTimers();
-			const activeEntryIds = new Set(activeTimers.map(({ entry }) => entry.id));
+		// Function to check for new/stopped timers (lightweight check using in-memory data only)
+		const checkForTimerChanges = () => {
+			// Get current active timers from in-memory timeData only (don't scan files)
+			const currentActiveTimers: Array<{ filePath: string; entry: TimeEntry }> = [];
+			this.timeData.forEach((pageData, filePath) => {
+				pageData.entries.forEach(entry => {
+					if (entry.startTime && !entry.endTime) {
+						currentActiveTimers.push({ filePath, entry });
+					}
+				});
+			});
+			
+			const activeEntryIds = new Set(currentActiveTimers.map(({ entry }) => entry.id));
 			const displayedEntryIds = new Set(timeDisplays.keys());
 			
 			// Check if we need a full refresh (new timer or timer stopped)
 			const needsFullRefresh = 
-				activeTimers.length !== displayedEntryIds.size ||
+				currentActiveTimers.length !== displayedEntryIds.size ||
 				![...displayedEntryIds].every(id => activeEntryIds.has(id)) ||
-				!activeTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
+				!currentActiveTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
 			
 			if (needsFullRefresh) {
-				await renderActiveTimers();
-				return;
-			}
-			
-			// Only update time displays for existing timers
-			for (const { entry } of activeTimers) {
-				const timeDisplay = timeDisplays.get(entry.id);
-				if (timeDisplay && entry.startTime && !entry.endTime) {
-					const elapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime));
-					timeDisplay.setText(this.formatTimeAsHHMMSS(elapsed));
-				}
+				renderActiveTimers();
 			}
 		};
 		
 		// Initial render
 		await renderActiveTimers();
 		
-		// Update timers every second (only updates time displays, not full re-render)
-		const updateInterval = window.setInterval(() => {
-			updateTimers().catch(err => console.error('Error updating active timers:', err));
-		}, 1000);
+		// Check for timer changes every 5 seconds (lightweight in-memory check only)
+		const checkInterval = window.setInterval(() => {
+			checkForTimerChanges();
+		}, 5000);
 		
-		// Check for new timers every 30 seconds (full refresh if needed)
+		// Full refresh every 30 seconds to catch new timers from other sources
 		const refreshInterval = window.setInterval(async () => {
-			await updateTimers();
+			await renderActiveTimers();
 		}, 30000);
 		
 		// Clean up intervals when the element is removed
 		ctx.addChild({
 			unload: () => {
-				window.clearInterval(updateInterval);
+				window.clearInterval(checkInterval);
 				window.clearInterval(refreshInterval);
 				updateIntervals.forEach(intervalId => window.clearInterval(intervalId));
 			}
@@ -2388,9 +2432,17 @@ export default class LapsePlugin extends Plugin {
 		// Sort groups by time descending
 		const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
 		
+		const groupBy = query.groupBy || 'project';
 		for (const [groupName, group] of sortedGroups) {
 			const groupDiv = breakdownDiv.createDiv({ cls: 'lapse-report-breakdown-item' });
-			groupDiv.createEl('span', { text: groupName, cls: 'lapse-report-breakdown-name' });
+			const nameSpan = groupDiv.createEl('span', { text: groupName, cls: 'lapse-report-breakdown-name' });
+			// Color the group name if grouping by project
+			if (groupBy === 'project') {
+				const projectColor = await this.getProjectColor(groupName);
+				if (projectColor) {
+					nameSpan.style.color = projectColor;
+				}
+			}
 			groupDiv.createEl('span', { text: this.formatTimeAsHHMMSS(group.totalTime), cls: 'lapse-report-breakdown-time' });
 		}
 		
@@ -2401,7 +2453,7 @@ export default class LapsePlugin extends Plugin {
 				group,
 				totalTime: data.totalTime
 			}));
-			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart, query.groupBy);
 		}
 	}
 
@@ -2464,7 +2516,17 @@ export default class LapsePlugin extends Plugin {
 			// Show grouped summary
 			for (const [groupName, group] of sortedGroups) {
 				const row = tbody.createEl('tr');
-				row.createEl('td', { text: groupName });
+				const groupCell = row.createEl('td');
+				// Color the group name if grouping by project
+				if (groupBy === 'project') {
+					const projectColor = await this.getProjectColor(groupName);
+					const groupSpan = groupCell.createSpan({ text: groupName });
+					if (projectColor) {
+						groupSpan.style.color = projectColor;
+					}
+				} else {
+					groupCell.setText(groupName);
+				}
 				row.createEl('td', { text: group.entryCount.toString() });
 				row.createEl('td', { text: this.formatTimeAsHHMMSS(group.totalTime) });
 			}
@@ -2477,7 +2539,7 @@ export default class LapsePlugin extends Plugin {
 				group,
 				totalTime: data.totalTime
 			}));
-			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart, query.groupBy);
 		}
 	}
 
@@ -2508,7 +2570,7 @@ export default class LapsePlugin extends Plugin {
 				group,
 				totalTime: data.totalTime
 			}));
-			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+			await this.renderReportChart(chartContainer, chartData, totalTime, query.chart, query.groupBy);
 		} else {
 			// If no chart specified or 'none', show a message
 			container.createEl('p', { 
@@ -2518,15 +2580,15 @@ export default class LapsePlugin extends Plugin {
 		}
 	}
 
-	async renderReportChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number, chartType: 'bar' | 'pie') {
+	async renderReportChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number, chartType: 'bar' | 'pie', groupBy?: string) {
 		if (chartType === 'pie') {
-			await this.renderPieChart(container, data, totalTime);
+			await this.renderPieChart(container, data, totalTime, groupBy);
 		} else {
-			await this.renderBarChart(container, data, totalTime);
+			await this.renderBarChart(container, data, totalTime, groupBy);
 		}
 	}
 
-	async renderPieChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number) {
+	async renderPieChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number, groupBy?: string) {
 		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 		svg.setAttribute('class', 'lapse-report-pie-chart');
 		svg.setAttribute('width', '300');
@@ -2534,17 +2596,30 @@ export default class LapsePlugin extends Plugin {
 		svg.setAttribute('viewBox', '0 0 300 300');
 		container.appendChild(svg);
 
-		const colors = [
+		const defaultColors = [
 			'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
 			'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C'
 		];
+
+		// Fetch project colors if grouping by project
+		const isGroupingByProject = groupBy === 'project';
+		const dataWithColors = await Promise.all(data.map(async ({ group, totalTime: time }, index) => {
+			let color = defaultColors[index % defaultColors.length];
+			if (isGroupingByProject) {
+				const projectColor = await this.getProjectColor(group);
+				if (projectColor) {
+					color = projectColor;
+				}
+			}
+			return { group, totalTime: time, color };
+		}));
 
 		const centerX = 150;
 		const centerY = 150;
 		const radius = 100;
 		let currentAngle = -Math.PI / 2; // Start at top
 
-		data.forEach(({ group, totalTime: time }, index) => {
+		dataWithColors.forEach(({ group, totalTime: time, color }) => {
 			const percentage = time / totalTime;
 			const angle = percentage * 2 * Math.PI;
 
@@ -2567,7 +2642,7 @@ export default class LapsePlugin extends Plugin {
 
 			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 			path.setAttribute('d', pathData);
-			path.setAttribute('fill', colors[index % colors.length]);
+			path.setAttribute('fill', color);
 			path.setAttribute('stroke', 'var(--background-primary)');
 			path.setAttribute('stroke-width', '2');
 			svg.appendChild(path);
@@ -2577,17 +2652,21 @@ export default class LapsePlugin extends Plugin {
 
 		// Add legend
 		const legend = container.createDiv({ cls: 'lapse-report-legend' });
-		data.forEach(({ group, totalTime: time }, index) => {
+		dataWithColors.forEach(({ group, totalTime: time, color }) => {
 			const legendItem = legend.createDiv({ cls: 'lapse-report-legend-item' });
 			const colorBox = legendItem.createDiv({ cls: 'lapse-report-legend-color' });
-			colorBox.style.backgroundColor = colors[index % colors.length];
+			colorBox.style.backgroundColor = color;
 			const label = legendItem.createDiv({ cls: 'lapse-report-legend-label' });
-			label.createSpan({ text: group });
+			const nameSpan = label.createSpan({ text: group });
+			// Color the project name if grouping by project
+			if (isGroupingByProject) {
+				nameSpan.style.color = color;
+			}
 			label.createSpan({ text: this.formatTimeAsHHMMSS(time), cls: 'lapse-report-legend-time' });
 		});
 	}
 
-	async renderBarChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number) {
+	async renderBarChart(container: HTMLElement, data: Array<{ group: string; totalTime: number }>, totalTime: number, groupBy?: string) {
 		const viewBoxWidth = 800;
 		const chartHeight = 250;
 		const labelHeight = 80;
@@ -2603,17 +2682,30 @@ export default class LapsePlugin extends Plugin {
 		svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
 		container.appendChild(svg);
 
-		const colors = [
+		const defaultColors = [
 			'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
 			'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C'
 		];
 
-		const maxTime = Math.max(...data.map(d => d.totalTime));
-		const barCount = data.length;
+		// Fetch project colors if grouping by project
+		const isGroupingByProject = groupBy === 'project';
+		const dataWithColors = await Promise.all(data.map(async (item, index) => {
+			let color = defaultColors[index % defaultColors.length];
+			if (isGroupingByProject) {
+				const projectColor = await this.getProjectColor(item.group);
+				if (projectColor) {
+					color = projectColor;
+				}
+			}
+			return { ...item, color };
+		}));
+
+		const maxTime = Math.max(...dataWithColors.map(d => d.totalTime));
+		const barCount = dataWithColors.length;
 		const barWidth = chartAreaWidth / barCount;
 		const maxBarHeight = chartHeight - padding * 2;
 
-		data.forEach((item, index) => {
+		dataWithColors.forEach((item, index) => {
 			const barHeight = maxTime > 0 ? (item.totalTime / maxTime) * maxBarHeight : 0;
 			const x = padding + index * barWidth;
 			const y = chartHeight - padding - barHeight;
@@ -2626,7 +2718,7 @@ export default class LapsePlugin extends Plugin {
 			rect.setAttribute('y', y.toString());
 			rect.setAttribute('width', actualBarWidth.toString());
 			rect.setAttribute('height', barHeight.toString());
-			rect.setAttribute('fill', colors[index % colors.length]);
+			rect.setAttribute('fill', item.color);
 			rect.setAttribute('rx', '4');
 			svg.appendChild(rect);
 
@@ -2646,7 +2738,8 @@ export default class LapsePlugin extends Plugin {
 			labelDiv.style.alignItems = 'flex-start';
 			labelDiv.style.justifyContent = 'center';
 			labelDiv.style.fontSize = barCount > 15 ? '9px' : barCount > 10 ? '10px' : '11px';
-			labelDiv.style.color = 'var(--text-muted)';
+			// Color the label with project color if grouping by project
+			labelDiv.style.color = isGroupingByProject ? item.color : 'var(--text-muted)';
 			labelDiv.style.textAlign = 'center';
 			labelDiv.style.wordWrap = 'break-word';
 			labelDiv.style.overflowWrap = 'break-word';
@@ -3404,14 +3497,49 @@ class LapseSidebarView extends ItemView {
 			for (const { filePath, entry } of activeTimers) {
 				const card = container.createDiv({ cls: 'lapse-activity-card' });
 				
-				// Timer display - big and centered
+				// Timer row with timer and stop button
+				const timerRow = card.createDiv({ cls: 'lapse-activity-timer-row' });
+				
+				// Timer display - big on the left
 				const elapsed = entry.duration + (entry.isPaused ? 0 : (Date.now() - entry.startTime!));
 				const timeText = this.plugin.formatTimeAsHHMMSS(elapsed);
-				const timerDisplay = card.createDiv({ 
+				const timerDisplay = timerRow.createDiv({ 
 					text: timeText, 
 					cls: 'lapse-activity-timer' 
 				});
 				this.timeDisplays.set(entry.id, timerDisplay);
+				
+				// Stop button on the right
+				const stopBtn = timerRow.createEl('button', {
+					cls: 'lapse-activity-stop-btn',
+					attr: { 'aria-label': 'Stop timer' }
+				});
+				setIcon(stopBtn, 'square');
+				stopBtn.onclick = async (e) => {
+					e.stopPropagation();
+					
+					// Find the entry in timeData and update it
+					const pageData = this.plugin.timeData.get(filePath);
+					if (pageData) {
+						const entryInData = pageData.entries.find(e => e.id === entry.id);
+						if (entryInData && entryInData.startTime && !entryInData.endTime) {
+							// Stop the timer
+							const now = Date.now();
+							entryInData.endTime = now;
+							entryInData.duration += (now - entryInData.startTime);
+							entryInData.startTime = null;
+							
+							// Update total time
+							pageData.totalTimeTracked = pageData.entries.reduce((sum, e) => sum + e.duration, 0);
+							
+							// Update frontmatter in the background
+							await this.plugin.updateFrontmatter(filePath);
+							
+							// Re-render to update the list
+							await this.render();
+						}
+					}
+				};
 				
 				// Get file name without extension
 				const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -3446,7 +3574,11 @@ class LapseSidebarView extends ItemView {
 				
 				// Project (if available)
 				if (project) {
-					detailsContainer.createDiv({ text: project, cls: 'lapse-activity-project' });
+					const projectColor = await this.plugin.getProjectColor(project);
+					const projectEl = detailsContainer.createDiv({ text: project, cls: 'lapse-activity-project' });
+					if (projectColor) {
+						projectEl.style.color = projectColor;
+					}
 				}
 				
 				// Entry label
@@ -3793,21 +3925,26 @@ class LapseSidebarView extends ItemView {
 		svg.setAttribute('viewBox', '0 0 200 200');
 		chartContainer.appendChild(svg);
 
-		// Generate colors for projects
-		const colors = [
+		// Generate colors for projects (use project colors if available)
+		const defaultColors = [
 			'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
 			'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C',
 			'#3498DB', '#2ECC71', '#F39C12', '#16A085'
 		];
 
 		// Convert map to array and sort by time (descending)
-		const projectData = Array.from(projectTimes.entries())
-			.map(([name, time], index) => ({
-				name,
-				time,
-				color: colors[index % colors.length]
-			}))
-			.sort((a, b) => b.time - a.time);
+		const projectData = await Promise.all(
+			Array.from(projectTimes.entries())
+				.sort((a, b) => b[1] - a[1])
+				.map(async ([name, time], index) => {
+					const projectColor = await this.plugin.getProjectColor(name);
+					return {
+						name,
+						time,
+						color: projectColor || defaultColors[index % defaultColors.length]
+					};
+				})
+		);
 
 		// Draw pie chart
 		let currentAngle = -Math.PI / 2; // Start at top
@@ -3860,6 +3997,7 @@ class LapseSidebarView extends ItemView {
 			// Project name and time
 			const label = legendItem.createDiv({ cls: 'lapse-sidebar-legend-label' });
 			const nameSpan = label.createSpan({ text: name });
+			nameSpan.style.color = color; // Color the project name
 			const timeSpan = label.createSpan({ 
 				text: this.plugin.formatTimeAsHHMMSS(time),
 				cls: 'lapse-sidebar-legend-time'
@@ -4671,7 +4809,23 @@ class LapseReportsView extends ItemView {
 			const allTags = new Set<string>();
 			item.entries.forEach(e => e.entry.tags?.forEach(t => allTags.add(t)));
 			
-			row.createEl('td', { text: projects.size > 0 ? Array.from(projects).join(', ') : '-' });
+			const projectCell = row.createEl('td');
+			if (projects.size > 0) {
+				const projectArray = Array.from(projects).filter((p): p is string => p !== null);
+				for (let i = 0; i < projectArray.length; i++) {
+					const projectName = projectArray[i];
+					const projectColor = await this.plugin.getProjectColor(projectName);
+					const projectSpan = projectCell.createSpan({ text: projectName });
+					if (projectColor) {
+						projectSpan.style.color = projectColor;
+					}
+					if (i < projectArray.length - 1) {
+						projectCell.createSpan({ text: ', ' });
+					}
+				}
+			} else {
+				projectCell.setText('-');
+			}
 			row.createEl('td', { text: allTags.size > 0 ? Array.from(allTags).map(t => `#${t}`).join(', ') : '-' });
 			row.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(item.totalTime) });
 			row.createEl('td', { text: item.entryCount.toString() });
@@ -4700,7 +4854,23 @@ class LapseReportsView extends ItemView {
 						const subTags = new Set<string>();
 						subGroup.entries.forEach(e => e.entry.tags?.forEach(t => subTags.add(t)));
 						
-						subRow.createEl('td', { text: subProjects.size > 0 ? Array.from(subProjects).join(', ') : '-' });
+						const subProjectCell = subRow.createEl('td');
+						if (subProjects.size > 0) {
+							const subProjectArray = Array.from(subProjects).filter((p): p is string => p !== null);
+							for (let i = 0; i < subProjectArray.length; i++) {
+								const projectName = subProjectArray[i];
+								const projectColor = await this.plugin.getProjectColor(projectName);
+								const projectSpan = subProjectCell.createSpan({ text: projectName });
+								if (projectColor) {
+									projectSpan.style.color = projectColor;
+								}
+								if (i < subProjectArray.length - 1) {
+									subProjectCell.createSpan({ text: ', ' });
+								}
+							}
+						} else {
+							subProjectCell.setText('-');
+						}
 						subRow.createEl('td', { text: subTags.size > 0 ? Array.from(subTags).map(t => `#${t}`).join(', ') : '-' });
 						subRow.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(subGroup.totalTime) });
 						subRow.createEl('td', { text: subGroup.entryCount.toString() });
@@ -4711,7 +4881,16 @@ class LapseReportsView extends ItemView {
 						const entryRow = tbody.createEl('tr', { cls: 'lapse-reports-entry-row' });
 						entryRow.createEl('td'); // Empty expand cell
 						entryRow.createEl('td', { text: `  ${entry.label}`, cls: 'lapse-reports-entry-label' });
-						entryRow.createEl('td', { text: project || '-' });
+						const entryProjectCell = entryRow.createEl('td');
+						if (project) {
+							const projectColor = await this.plugin.getProjectColor(project);
+							const projectSpan = entryProjectCell.createSpan({ text: project });
+							if (projectColor) {
+								projectSpan.style.color = projectColor;
+							}
+						} else {
+							entryProjectCell.setText('-');
+						}
 						entryRow.createEl('td', { text: entry.tags && entry.tags.length > 0 ? entry.tags.map(t => `#${t}`).join(', ') : '-' });
 						
 						const entryDuration = entry.endTime 
@@ -4967,12 +5146,25 @@ class LapseReportsView extends ItemView {
 		const barCount = data.length;
 		const barWidth = chartAreaWidth / barCount; // Each bar gets equal width in viewBox
 		const maxBarHeight = chartHeight - padding * 2;
-		const colors = [
+		const defaultColors = [
 			'#4A90E2', '#50C878', '#FF6B6B', '#FFD93D', 
 			'#9B59B6', '#E67E22', '#1ABC9C', '#E74C3C'
 		];
 
-		data.forEach((item, index) => {
+		// Fetch project colors if grouping by project
+		const isGroupingByProject = this.groupBy === 'project';
+		const dataWithColors = await Promise.all(data.map(async (item, index) => {
+			let color = defaultColors[index % defaultColors.length];
+			if (isGroupingByProject) {
+				const projectColor = await this.plugin.getProjectColor(item.group);
+				if (projectColor) {
+					color = projectColor;
+				}
+			}
+			return { ...item, color };
+		}));
+
+		dataWithColors.forEach((item, index) => {
 			const barHeight = maxTime > 0 ? (item.totalTime / maxTime) * maxBarHeight : 0;
 			const x = padding + index * barWidth;
 			const y = chartHeight - padding - barHeight;
@@ -4986,7 +5178,7 @@ class LapseReportsView extends ItemView {
 			rect.setAttribute('y', y.toString());
 			rect.setAttribute('width', actualBarWidth.toString());
 			rect.setAttribute('height', barHeight.toString());
-			rect.setAttribute('fill', colors[index % colors.length]);
+			rect.setAttribute('fill', item.color);
 			rect.setAttribute('rx', '4');
 			svg.appendChild(rect);
 
@@ -5008,7 +5200,8 @@ class LapseReportsView extends ItemView {
 			labelDiv.style.alignItems = 'flex-start';
 			labelDiv.style.justifyContent = 'center';
 			labelDiv.style.fontSize = barCount > 15 ? '9px' : barCount > 10 ? '10px' : '11px';
-			labelDiv.style.color = 'var(--text-muted)';
+			// Color the label with project color if grouping by project
+			labelDiv.style.color = isGroupingByProject ? item.color : 'var(--text-muted)';
 			labelDiv.style.textAlign = 'center';
 			labelDiv.style.wordWrap = 'break-word';
 			labelDiv.style.overflowWrap = 'break-word';

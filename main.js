@@ -408,8 +408,29 @@ var LapsePlugin = class extends import_obsidian.Plugin {
               } catch (e) {
                 currentEntry.tags = [];
               }
-            } else {
+            } else if (tagsStr) {
               currentEntry.tags = tagsStr.split(",").map((t) => t.trim()).filter((t) => t);
+            } else {
+              currentEntry.tags = [];
+              let j = i + 1;
+              while (j < lines.length) {
+                const nextLine = lines[j];
+                const nextTrimmed = nextLine.trim();
+                const nextIndent = nextLine.length - nextLine.trimStart().length;
+                if (nextTrimmed.startsWith("-") && nextIndent > indent) {
+                  const tagValue = nextTrimmed.substring(1).trim();
+                  const cleanTag = tagValue.replace(/^["'](.*)["']$/, "$1");
+                  if (cleanTag) {
+                    currentEntry.tags.push(cleanTag);
+                  }
+                  j++;
+                } else if (nextTrimmed === "") {
+                  j++;
+                } else {
+                  break;
+                }
+              }
+              i = j - 1;
             }
           }
         }
@@ -803,7 +824,7 @@ ${content}`;
           if (line.startsWith(`${key}:`)) {
             let value = line.replace(new RegExp(`^${key}:\\s*`), "").trim();
             value = value.replace(/^["']+|["']+$/g, "");
-            if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/)) {
+            if (value.match(/^#[0-9A-Fa-f]{3,8}$/) || value.match(/^[a-zA-Z]+$/) || value.match(/^var\(/)) {
               return value;
             }
           }
@@ -1182,11 +1203,19 @@ ${content}`;
         (0, import_obsidian.setIcon)(stopBtn, "square");
         stopBtn.onclick = async (e) => {
           e.stopPropagation();
-          entry.endTime = Date.now();
-          entry.duration += Date.now() - entry.startTime;
-          entry.startTime = null;
-          await this.updateFrontmatter(filePath);
-          await renderActiveTimers();
+          const pageData = this.timeData.get(filePath);
+          if (pageData) {
+            const entryInData = pageData.entries.find((e2) => e2.id === entry.id);
+            if (entryInData && entryInData.startTime && !entryInData.endTime) {
+              const now = Date.now();
+              entryInData.endTime = now;
+              entryInData.duration += now - entryInData.startTime;
+              entryInData.startTime = null;
+              pageData.totalTimeTracked = pageData.entries.reduce((sum, e2) => sum + e2.duration, 0);
+              await this.updateFrontmatter(filePath);
+              await renderActiveTimers();
+            }
+          }
         };
         const intervalId = window.setInterval(() => {
           if (entry.startTime && !entry.endTime) {
@@ -1203,33 +1232,32 @@ ${content}`;
         updateIntervals.set(entry.id, intervalId);
       }
     };
-    const updateTimers = async () => {
-      const activeTimers = await getActiveTimers();
-      const activeEntryIds = new Set(activeTimers.map(({ entry }) => entry.id));
+    const checkForTimerChanges = () => {
+      const currentActiveTimers = [];
+      this.timeData.forEach((pageData, filePath) => {
+        pageData.entries.forEach((entry) => {
+          if (entry.startTime && !entry.endTime) {
+            currentActiveTimers.push({ filePath, entry });
+          }
+        });
+      });
+      const activeEntryIds = new Set(currentActiveTimers.map(({ entry }) => entry.id));
       const displayedEntryIds = new Set(timeDisplays.keys());
-      const needsFullRefresh = activeTimers.length !== displayedEntryIds.size || ![...displayedEntryIds].every((id) => activeEntryIds.has(id)) || !activeTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
+      const needsFullRefresh = currentActiveTimers.length !== displayedEntryIds.size || ![...displayedEntryIds].every((id) => activeEntryIds.has(id)) || !currentActiveTimers.every(({ entry }) => displayedEntryIds.has(entry.id));
       if (needsFullRefresh) {
-        await renderActiveTimers();
-        return;
-      }
-      for (const { entry } of activeTimers) {
-        const timeDisplay = timeDisplays.get(entry.id);
-        if (timeDisplay && entry.startTime && !entry.endTime) {
-          const elapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
-          timeDisplay.setText(this.formatTimeAsHHMMSS(elapsed));
-        }
+        renderActiveTimers();
       }
     };
     await renderActiveTimers();
-    const updateInterval = window.setInterval(() => {
-      updateTimers().catch((err) => console.error("Error updating active timers:", err));
-    }, 1e3);
+    const checkInterval = window.setInterval(() => {
+      checkForTimerChanges();
+    }, 5e3);
     const refreshInterval = window.setInterval(async () => {
-      await updateTimers();
+      await renderActiveTimers();
     }, 3e4);
     ctx.addChild({
       unload: () => {
-        window.clearInterval(updateInterval);
+        window.clearInterval(checkInterval);
         window.clearInterval(refreshInterval);
         updateIntervals.forEach((intervalId) => window.clearInterval(intervalId));
       }
@@ -1693,9 +1721,16 @@ ${content}`;
     summaryDiv.createEl("span", { text: this.formatTimeAsHHMMSS(totalTime), cls: "lapse-report-summary-value" });
     const breakdownDiv = container.createDiv({ cls: "lapse-report-breakdown" });
     const sortedGroups = Array.from(groupedData.entries()).sort((a, b) => b[1].totalTime - a[1].totalTime);
+    const groupBy = query.groupBy || "project";
     for (const [groupName, group] of sortedGroups) {
       const groupDiv = breakdownDiv.createDiv({ cls: "lapse-report-breakdown-item" });
-      groupDiv.createEl("span", { text: groupName, cls: "lapse-report-breakdown-name" });
+      const nameSpan = groupDiv.createEl("span", { text: groupName, cls: "lapse-report-breakdown-name" });
+      if (groupBy === "project") {
+        const projectColor = await this.getProjectColor(groupName);
+        if (projectColor) {
+          nameSpan.style.color = projectColor;
+        }
+      }
       groupDiv.createEl("span", { text: this.formatTimeAsHHMMSS(group.totalTime), cls: "lapse-report-breakdown-time" });
     }
     if (query.chart && query.chart !== "none" && sortedGroups.length > 0) {
@@ -1704,7 +1739,7 @@ ${content}`;
         group,
         totalTime: data.totalTime
       }));
-      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart, query.groupBy);
     }
   }
   async renderReportTable(container, groupedData, query) {
@@ -1746,7 +1781,16 @@ ${content}`;
     } else {
       for (const [groupName, group] of sortedGroups) {
         const row = tbody.createEl("tr");
-        row.createEl("td", { text: groupName });
+        const groupCell = row.createEl("td");
+        if (groupBy === "project") {
+          const projectColor = await this.getProjectColor(groupName);
+          const groupSpan = groupCell.createSpan({ text: groupName });
+          if (projectColor) {
+            groupSpan.style.color = projectColor;
+          }
+        } else {
+          groupCell.setText(groupName);
+        }
         row.createEl("td", { text: group.entryCount.toString() });
         row.createEl("td", { text: this.formatTimeAsHHMMSS(group.totalTime) });
       }
@@ -1757,7 +1801,7 @@ ${content}`;
         group,
         totalTime: data.totalTime
       }));
-      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart, query.groupBy);
     }
   }
   getGroupByLabel(groupBy) {
@@ -1786,7 +1830,7 @@ ${content}`;
         group,
         totalTime: data.totalTime
       }));
-      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart);
+      await this.renderReportChart(chartContainer, chartData, totalTime, query.chart, query.groupBy);
     } else {
       container.createEl("p", {
         text: "Please specify a chart type (chart: pie or chart: bar)",
@@ -1794,21 +1838,21 @@ ${content}`;
       });
     }
   }
-  async renderReportChart(container, data, totalTime, chartType) {
+  async renderReportChart(container, data, totalTime, chartType, groupBy) {
     if (chartType === "pie") {
-      await this.renderPieChart(container, data, totalTime);
+      await this.renderPieChart(container, data, totalTime, groupBy);
     } else {
-      await this.renderBarChart(container, data, totalTime);
+      await this.renderBarChart(container, data, totalTime, groupBy);
     }
   }
-  async renderPieChart(container, data, totalTime) {
+  async renderPieChart(container, data, totalTime, groupBy) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "lapse-report-pie-chart");
     svg.setAttribute("width", "300");
     svg.setAttribute("height", "300");
     svg.setAttribute("viewBox", "0 0 300 300");
     container.appendChild(svg);
-    const colors = [
+    const defaultColors = [
       "#4A90E2",
       "#50C878",
       "#FF6B6B",
@@ -1818,11 +1862,22 @@ ${content}`;
       "#1ABC9C",
       "#E74C3C"
     ];
+    const isGroupingByProject = groupBy === "project";
+    const dataWithColors = await Promise.all(data.map(async ({ group, totalTime: time }, index) => {
+      let color = defaultColors[index % defaultColors.length];
+      if (isGroupingByProject) {
+        const projectColor = await this.getProjectColor(group);
+        if (projectColor) {
+          color = projectColor;
+        }
+      }
+      return { group, totalTime: time, color };
+    }));
     const centerX = 150;
     const centerY = 150;
     const radius = 100;
     let currentAngle = -Math.PI / 2;
-    data.forEach(({ group, totalTime: time }, index) => {
+    dataWithColors.forEach(({ group, totalTime: time, color }) => {
       const percentage = time / totalTime;
       const angle = percentage * 2 * Math.PI;
       const startAngle = currentAngle;
@@ -1840,23 +1895,26 @@ ${content}`;
       ].join(" ");
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", pathData);
-      path.setAttribute("fill", colors[index % colors.length]);
+      path.setAttribute("fill", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "2");
       svg.appendChild(path);
       currentAngle += angle;
     });
     const legend = container.createDiv({ cls: "lapse-report-legend" });
-    data.forEach(({ group, totalTime: time }, index) => {
+    dataWithColors.forEach(({ group, totalTime: time, color }) => {
       const legendItem = legend.createDiv({ cls: "lapse-report-legend-item" });
       const colorBox = legendItem.createDiv({ cls: "lapse-report-legend-color" });
-      colorBox.style.backgroundColor = colors[index % colors.length];
+      colorBox.style.backgroundColor = color;
       const label = legendItem.createDiv({ cls: "lapse-report-legend-label" });
-      label.createSpan({ text: group });
+      const nameSpan = label.createSpan({ text: group });
+      if (isGroupingByProject) {
+        nameSpan.style.color = color;
+      }
       label.createSpan({ text: this.formatTimeAsHHMMSS(time), cls: "lapse-report-legend-time" });
     });
   }
-  async renderBarChart(container, data, totalTime) {
+  async renderBarChart(container, data, totalTime, groupBy) {
     const viewBoxWidth = 800;
     const chartHeight = 250;
     const labelHeight = 80;
@@ -1870,7 +1928,7 @@ ${content}`;
     svg.setAttribute("viewBox", `0 0 ${viewBoxWidth} ${totalHeight}`);
     svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
     container.appendChild(svg);
-    const colors = [
+    const defaultColors = [
       "#4A90E2",
       "#50C878",
       "#FF6B6B",
@@ -1880,11 +1938,22 @@ ${content}`;
       "#1ABC9C",
       "#E74C3C"
     ];
-    const maxTime = Math.max(...data.map((d) => d.totalTime));
-    const barCount = data.length;
+    const isGroupingByProject = groupBy === "project";
+    const dataWithColors = await Promise.all(data.map(async (item, index) => {
+      let color = defaultColors[index % defaultColors.length];
+      if (isGroupingByProject) {
+        const projectColor = await this.getProjectColor(item.group);
+        if (projectColor) {
+          color = projectColor;
+        }
+      }
+      return { ...item, color };
+    }));
+    const maxTime = Math.max(...dataWithColors.map((d) => d.totalTime));
+    const barCount = dataWithColors.length;
     const barWidth = chartAreaWidth / barCount;
     const maxBarHeight = chartHeight - padding * 2;
-    data.forEach((item, index) => {
+    dataWithColors.forEach((item, index) => {
       const barHeight = maxTime > 0 ? item.totalTime / maxTime * maxBarHeight : 0;
       const x = padding + index * barWidth;
       const y = chartHeight - padding - barHeight;
@@ -1895,7 +1964,7 @@ ${content}`;
       rect.setAttribute("y", y.toString());
       rect.setAttribute("width", actualBarWidth.toString());
       rect.setAttribute("height", barHeight.toString());
-      rect.setAttribute("fill", colors[index % colors.length]);
+      rect.setAttribute("fill", item.color);
       rect.setAttribute("rx", "4");
       svg.appendChild(rect);
       const labelY = chartHeight + 10;
@@ -1912,7 +1981,7 @@ ${content}`;
       labelDiv.style.alignItems = "flex-start";
       labelDiv.style.justifyContent = "center";
       labelDiv.style.fontSize = barCount > 15 ? "9px" : barCount > 10 ? "10px" : "11px";
-      labelDiv.style.color = "var(--text-muted)";
+      labelDiv.style.color = isGroupingByProject ? item.color : "var(--text-muted)";
       labelDiv.style.textAlign = "center";
       labelDiv.style.wordWrap = "break-word";
       labelDiv.style.overflowWrap = "break-word";
@@ -2487,13 +2556,35 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     } else {
       for (const { filePath, entry } of activeTimers) {
         const card = container.createDiv({ cls: "lapse-activity-card" });
+        const timerRow = card.createDiv({ cls: "lapse-activity-timer-row" });
         const elapsed = entry.duration + (entry.isPaused ? 0 : Date.now() - entry.startTime);
         const timeText = this.plugin.formatTimeAsHHMMSS(elapsed);
-        const timerDisplay = card.createDiv({
+        const timerDisplay = timerRow.createDiv({
           text: timeText,
           cls: "lapse-activity-timer"
         });
         this.timeDisplays.set(entry.id, timerDisplay);
+        const stopBtn = timerRow.createEl("button", {
+          cls: "lapse-activity-stop-btn",
+          attr: { "aria-label": "Stop timer" }
+        });
+        (0, import_obsidian.setIcon)(stopBtn, "square");
+        stopBtn.onclick = async (e) => {
+          e.stopPropagation();
+          const pageData = this.plugin.timeData.get(filePath);
+          if (pageData) {
+            const entryInData = pageData.entries.find((e2) => e2.id === entry.id);
+            if (entryInData && entryInData.startTime && !entryInData.endTime) {
+              const now = Date.now();
+              entryInData.endTime = now;
+              entryInData.duration += now - entryInData.startTime;
+              entryInData.startTime = null;
+              pageData.totalTimeTracked = pageData.entries.reduce((sum, e2) => sum + e2.duration, 0);
+              await this.plugin.updateFrontmatter(filePath);
+              await this.render();
+            }
+          }
+        };
         const file = this.app.vault.getAbstractFileByPath(filePath);
         let fileName = file && file instanceof import_obsidian.TFile ? file.basename : ((_a = filePath.split("/").pop()) == null ? void 0 : _a.replace(".md", "")) || filePath;
         if (this.plugin.settings.hideTimestampsInViews) {
@@ -2514,7 +2605,11 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
         };
         const project = await this.plugin.getProjectFromFrontmatter(filePath);
         if (project) {
-          detailsContainer.createDiv({ text: project, cls: "lapse-activity-project" });
+          const projectColor = await this.plugin.getProjectColor(project);
+          const projectEl = detailsContainer.createDiv({ text: project, cls: "lapse-activity-project" });
+          if (projectColor) {
+            projectEl.style.color = projectColor;
+          }
         }
         detailsContainer.createDiv({ text: entry.label, cls: "lapse-activity-label" });
       }
@@ -2747,7 +2842,7 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
     svg.setAttribute("height", "200");
     svg.setAttribute("viewBox", "0 0 200 200");
     chartContainer.appendChild(svg);
-    const colors = [
+    const defaultColors = [
       "#4A90E2",
       "#50C878",
       "#FF6B6B",
@@ -2761,11 +2856,16 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
       "#F39C12",
       "#16A085"
     ];
-    const projectData = Array.from(projectTimes.entries()).map(([name, time], index) => ({
-      name,
-      time,
-      color: colors[index % colors.length]
-    })).sort((a, b) => b.time - a.time);
+    const projectData = await Promise.all(
+      Array.from(projectTimes.entries()).sort((a, b) => b[1] - a[1]).map(async ([name, time], index) => {
+        const projectColor = await this.plugin.getProjectColor(name);
+        return {
+          name,
+          time,
+          color: projectColor || defaultColors[index % defaultColors.length]
+        };
+      })
+    );
     let currentAngle = -Math.PI / 2;
     const centerX = 100;
     const centerY = 100;
@@ -2801,6 +2901,7 @@ var LapseSidebarView = class extends import_obsidian.ItemView {
       colorBox.style.backgroundColor = color;
       const label = legendItem.createDiv({ cls: "lapse-sidebar-legend-label" });
       const nameSpan = label.createSpan({ text: name });
+      nameSpan.style.color = color;
       const timeSpan = label.createSpan({
         text: this.plugin.formatTimeAsHHMMSS(time),
         cls: "lapse-sidebar-legend-time"
@@ -3315,7 +3416,23 @@ var LapseReportsView = class extends import_obsidian.ItemView {
         var _a;
         return (_a = e.entry.tags) == null ? void 0 : _a.forEach((t) => allTags.add(t));
       });
-      row.createEl("td", { text: projects.size > 0 ? Array.from(projects).join(", ") : "-" });
+      const projectCell = row.createEl("td");
+      if (projects.size > 0) {
+        const projectArray = Array.from(projects).filter((p) => p !== null);
+        for (let i = 0; i < projectArray.length; i++) {
+          const projectName = projectArray[i];
+          const projectColor = await this.plugin.getProjectColor(projectName);
+          const projectSpan = projectCell.createSpan({ text: projectName });
+          if (projectColor) {
+            projectSpan.style.color = projectColor;
+          }
+          if (i < projectArray.length - 1) {
+            projectCell.createSpan({ text: ", " });
+          }
+        }
+      } else {
+        projectCell.setText("-");
+      }
       row.createEl("td", { text: allTags.size > 0 ? Array.from(allTags).map((t) => `#${t}`).join(", ") : "-" });
       row.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(item.totalTime) });
       row.createEl("td", { text: item.entryCount.toString() });
@@ -3340,7 +3457,23 @@ var LapseReportsView = class extends import_obsidian.ItemView {
               var _a;
               return (_a = e.entry.tags) == null ? void 0 : _a.forEach((t) => subTags.add(t));
             });
-            subRow.createEl("td", { text: subProjects.size > 0 ? Array.from(subProjects).join(", ") : "-" });
+            const subProjectCell = subRow.createEl("td");
+            if (subProjects.size > 0) {
+              const subProjectArray = Array.from(subProjects).filter((p) => p !== null);
+              for (let i = 0; i < subProjectArray.length; i++) {
+                const projectName = subProjectArray[i];
+                const projectColor = await this.plugin.getProjectColor(projectName);
+                const projectSpan = subProjectCell.createSpan({ text: projectName });
+                if (projectColor) {
+                  projectSpan.style.color = projectColor;
+                }
+                if (i < subProjectArray.length - 1) {
+                  subProjectCell.createSpan({ text: ", " });
+                }
+              }
+            } else {
+              subProjectCell.setText("-");
+            }
             subRow.createEl("td", { text: subTags.size > 0 ? Array.from(subTags).map((t) => `#${t}`).join(", ") : "-" });
             subRow.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(subGroup.totalTime) });
             subRow.createEl("td", { text: subGroup.entryCount.toString() });
@@ -3350,7 +3483,16 @@ var LapseReportsView = class extends import_obsidian.ItemView {
             const entryRow = tbody.createEl("tr", { cls: "lapse-reports-entry-row" });
             entryRow.createEl("td");
             entryRow.createEl("td", { text: `  ${entry.label}`, cls: "lapse-reports-entry-label" });
-            entryRow.createEl("td", { text: project || "-" });
+            const entryProjectCell = entryRow.createEl("td");
+            if (project) {
+              const projectColor = await this.plugin.getProjectColor(project);
+              const projectSpan = entryProjectCell.createSpan({ text: project });
+              if (projectColor) {
+                projectSpan.style.color = projectColor;
+              }
+            } else {
+              entryProjectCell.setText("-");
+            }
             entryRow.createEl("td", { text: entry.tags && entry.tags.length > 0 ? entry.tags.map((t) => `#${t}`).join(", ") : "-" });
             const entryDuration = entry.endTime ? entry.duration : entry.duration + (Date.now() - entry.startTime);
             entryRow.createEl("td", { text: this.plugin.formatTimeAsHHMMSS(entryDuration) });
@@ -3529,7 +3671,7 @@ var LapseReportsView = class extends import_obsidian.ItemView {
     const barCount = data.length;
     const barWidth = chartAreaWidth / barCount;
     const maxBarHeight = chartHeight - padding * 2;
-    const colors = [
+    const defaultColors = [
       "#4A90E2",
       "#50C878",
       "#FF6B6B",
@@ -3539,7 +3681,18 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       "#1ABC9C",
       "#E74C3C"
     ];
-    data.forEach((item, index) => {
+    const isGroupingByProject = this.groupBy === "project";
+    const dataWithColors = await Promise.all(data.map(async (item, index) => {
+      let color = defaultColors[index % defaultColors.length];
+      if (isGroupingByProject) {
+        const projectColor = await this.plugin.getProjectColor(item.group);
+        if (projectColor) {
+          color = projectColor;
+        }
+      }
+      return { ...item, color };
+    }));
+    dataWithColors.forEach((item, index) => {
       const barHeight = maxTime > 0 ? item.totalTime / maxTime * maxBarHeight : 0;
       const x = padding + index * barWidth;
       const y = chartHeight - padding - barHeight;
@@ -3550,7 +3703,7 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       rect.setAttribute("y", y.toString());
       rect.setAttribute("width", actualBarWidth.toString());
       rect.setAttribute("height", barHeight.toString());
-      rect.setAttribute("fill", colors[index % colors.length]);
+      rect.setAttribute("fill", item.color);
       rect.setAttribute("rx", "4");
       svg.appendChild(rect);
       const labelY = chartHeight + 10;
@@ -3567,7 +3720,7 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       labelDiv.style.alignItems = "flex-start";
       labelDiv.style.justifyContent = "center";
       labelDiv.style.fontSize = barCount > 15 ? "9px" : barCount > 10 ? "10px" : "11px";
-      labelDiv.style.color = "var(--text-muted)";
+      labelDiv.style.color = isGroupingByProject ? item.color : "var(--text-muted)";
       labelDiv.style.textAlign = "center";
       labelDiv.style.wordWrap = "break-word";
       labelDiv.style.overflowWrap = "break-word";
