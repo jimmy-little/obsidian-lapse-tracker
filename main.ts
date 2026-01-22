@@ -88,6 +88,23 @@ interface EntryCache {
 	[filePath: string]: CachedFileData;
 }
 
+interface TemplateData {
+	template: TFile;
+	templateName: string;
+	project: string | null;
+	projectColor: string | null;
+}
+
+interface TemplateGroupResult {
+	grouped: Map<string, TemplateData[]>;
+	sortedProjects: string[];
+}
+
+interface NoteEntryGroup {
+	file: TFile;
+	entries: TimeEntry[];
+}
+
 export default class LapsePlugin extends Plugin {
 	settings: LapseSettings;
 	timeData: Map<string, PageTimeData> = new Map();
@@ -96,6 +113,7 @@ export default class LapsePlugin extends Plugin {
 	statusBarItem: HTMLElement | null = null; // Status bar element
 	statusBarUpdateInterval: number | null = null; // Interval for updating status bar
 	pendingSaves: Promise<void>[] = []; // Track pending save operations
+	colorMeasurementEl: HTMLElement | null = null; // Hidden element for measuring computed colors
 
 	async onload() {
 		const pluginStartTime = Date.now();
@@ -170,6 +188,12 @@ export default class LapsePlugin extends Plugin {
 			(leaf) => new LapseButtonsView(leaf, this)
 		);
 
+		// Register the entry grid view
+		this.registerView(
+			'lapse-grid',
+			(leaf) => new LapseGridView(leaf, this)
+		);
+
 		// Add ribbon icons
 		this.addRibbonIcon('clock', 'Lapse: Show Activity', () => {
 			this.activateView();
@@ -181,6 +205,10 @@ export default class LapsePlugin extends Plugin {
 
 		this.addRibbonIcon('play-circle', 'Lapse: Show Quick Start', () => {
 			this.activateButtonsView();
+		});
+
+		this.addRibbonIcon('table', 'Lapse: Show Entry Grid', () => {
+			this.activateGridView();
 		});
 
 		// Add command to insert timer
@@ -384,6 +412,15 @@ export default class LapsePlugin extends Plugin {
 			}
 		});
 
+		// Add command to show entry grid view
+		this.addCommand({
+			id: 'show-lapse-grid',
+			name: 'Show entry grid',
+			callback: () => {
+				this.activateGridView();
+			}
+		});
+
 		// Add command to insert lapse button
 		this.addCommand({
 			id: 'insert-lapse-button',
@@ -469,6 +506,10 @@ export default class LapsePlugin extends Plugin {
 			
 			// Parse entries using configured key
 			const entriesKey = this.settings.entriesKey;
+			const parseTimestampValue = (value?: string | null): number | null => {
+				if (!value) return null;
+				return this.parseDatetimeLocal(value);
+			};
 			let inEntries = false;
 			let currentEntry: any = null;
 			const entries: TimeEntry[] = [];
@@ -491,8 +532,8 @@ export default class LapsePlugin extends Plugin {
 							entries.push({
 								id: `${filePath}-${entries.length}-${Date.now()}`,
 								label: currentEntry.label || 'Untitled',
-								startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
-								endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
+								startTime: parseTimestampValue(currentEntry.start),
+								endTime: parseTimestampValue(currentEntry.end),
 								duration: (currentEntry.duration || 0) * 1000,
 								isPaused: false,
 								tags: currentEntry.tags || []
@@ -510,8 +551,8 @@ export default class LapsePlugin extends Plugin {
 							entries.push({
 								id: `${filePath}-${entries.length}-${Date.now()}`,
 								label: currentEntry.label || 'Untitled',
-								startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
-								endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
+								startTime: parseTimestampValue(currentEntry.start),
+								endTime: parseTimestampValue(currentEntry.end),
 								duration: (currentEntry.duration || 0) * 1000,
 								isPaused: false,
 								tags: currentEntry.tags || []
@@ -585,12 +626,64 @@ export default class LapsePlugin extends Plugin {
 				entries.push({
 					id: `${filePath}-${entries.length}-${Date.now()}`,
 					label: currentEntry.label || 'Untitled',
-					startTime: currentEntry.start ? new Date(currentEntry.start).getTime() : null,
-					endTime: currentEntry.end ? new Date(currentEntry.end).getTime() : null,
+					startTime: parseTimestampValue(currentEntry.start),
+					endTime: parseTimestampValue(currentEntry.end),
 					duration: (currentEntry.duration || 0) * 1000,
 					isPaused: false,
 					tags: currentEntry.tags || []
 				});
+			}
+
+			// Fallback: if no lapseEntries found, check for top-level startTime/endTime
+			if (entries.length === 0) {
+				const startTimeKey = this.settings.startTimeKey;
+				const endTimeKey = this.settings.endTimeKey;
+				let topLevelStart: string | null = null;
+				let topLevelEnd: string | null = null;
+				let topLevelTags: string[] = [];
+
+				for (const line of lines) {
+					const trimmed = line.trim();
+					if (trimmed.startsWith(`${startTimeKey}:`)) {
+						topLevelStart = trimmed.replace(`${startTimeKey}:`, '').trim();
+					} else if (trimmed.startsWith(`${endTimeKey}:`)) {
+						topLevelEnd = trimmed.replace(`${endTimeKey}:`, '').trim();
+					} else if (trimmed.startsWith('tags:')) {
+						const tagsStr = trimmed.replace('tags:', '').trim();
+						if (tagsStr.startsWith('[')) {
+							try {
+								topLevelTags = JSON.parse(tagsStr);
+							} catch {
+								topLevelTags = [];
+							}
+						} else if (tagsStr) {
+							topLevelTags = tagsStr.split(',').map(t => t.trim()).filter(t => t);
+						}
+					}
+				}
+
+				// Create synthetic entry from top-level times if we have at least a start time
+				if (topLevelStart) {
+					const parsedStart = parseTimestampValue(topLevelStart);
+					const parsedEnd = parseTimestampValue(topLevelEnd);
+					const duration = (parsedStart && parsedEnd) ? Math.max(0, parsedEnd - parsedStart) : 0;
+					
+					// Use filename as label
+					const noteName = file.basename;
+					const label = this.settings.removeTimestampFromFileName 
+						? this.removeTimestampFromFileName(noteName) 
+						: noteName;
+
+					entries.push({
+						id: `${filePath}-fallback-${Date.now()}`,
+						label: label,
+						startTime: parsedStart,
+						endTime: parsedEnd,
+						duration: duration,
+						isPaused: false,
+						tags: topLevelTags
+					});
+				}
 			}
 
 			// Update page data
@@ -636,45 +729,47 @@ export default class LapsePlugin extends Plugin {
 			const match = content.match(frontmatterRegex);
 
 			// Normalize tag (remove # if present, we'll add it in frontmatter)
-			const tagName = defaultTag.startsWith('#') ? defaultTag.substring(1) : defaultTag;
+			const tagName = this.normalizeTagValue(defaultTag);
+			if (!tagName) {
+				return;
+			}
 
 			if (match) {
-				// Check if tag already exists in frontmatter
+				// Existing frontmatter - make sure tags block includes the default tag
 				const frontmatter = match[1];
-				if (frontmatter.includes(`tags:`) || frontmatter.includes(`tag:`)) {
-					// Tags already exist, check if our tag is there
-					const tagsMatch = frontmatter.match(/tags?:\s*\[?([^\]\n]+)\]?/);
-					if (tagsMatch) {
-						const existingTags = tagsMatch[1].split(',').map(t => t.trim().replace(/['"#]/g, ''));
-						if (existingTags.includes(tagName)) {
-							return; // Tag already exists
-						}
+				const lines = frontmatter.split('\n');
+				const tagsLineIndex = lines.findIndex(line => line.trim().toLowerCase().startsWith('tags:'));
+
+				let existingTags: string[] = [];
+				let indent = '';
+				let replaceCount = 0;
+
+				if (tagsLineIndex >= 0) {
+					const parsed = this.parseTagsBlock(lines, tagsLineIndex);
+					existingTags = parsed.tags;
+					indent = parsed.indent;
+					replaceCount = parsed.endIndex - tagsLineIndex;
+				}
+
+				const normalizedExisting = existingTags
+					.map(tag => this.normalizeTagValue(tag))
+					.filter(tag => tag.length > 0);
+
+				const tagSet = new Set(normalizedExisting);
+				const tagAlreadyPresent = tagSet.has(tagName);
+				tagSet.add(tagName);
+
+				if (!tagAlreadyPresent || tagsLineIndex < 0) {
+					const combinedTags = Array.from(tagSet);
+					const newTagsLine = `${indent}tags: [${combinedTags.map(t => `"${t}"`).join(', ')}]`;
+
+					if (tagsLineIndex >= 0) {
+						lines.splice(tagsLineIndex, Math.max(replaceCount, 1), newTagsLine);
+					} else {
+						lines.unshift(newTagsLine);
 					}
-					// Add tag to existing tags - use multiline flag and match only on the tags line
-					const newContent = content.replace(
-						/(^tags?:\s*)(.+?)$/m,
-						(match, prefix, existingTagsStr) => {
-							// Parse existing tags - handle both array [a, b] and single value formats
-							let tagList: string[] = [];
-							const arrayMatch = existingTagsStr.match(/\[(.+)\]/);
-							if (arrayMatch) {
-								// Array format: tags: [a, b]
-								tagList = arrayMatch[1].split(',').map((t: string) => t.trim().replace(/['"#]/g, '')).filter((t: string) => t);
-							} else {
-								// Single value or space-separated: tags: #meeting or tags: meeting
-								tagList = existingTagsStr.split(/[\s,]+/).map((t: string) => t.trim().replace(/['"#]/g, '')).filter((t: string) => t);
-							}
-							
-							if (!tagList.includes(tagName)) {
-								tagList.push(tagName);
-							}
-							return `${prefix}[${tagList.map((t: string) => `"${t}"`).join(', ')}]`;
-						}
-					);
-					await this.app.vault.modify(file, newContent);
-				} else {
-					// Add tags field to frontmatter
-					const newFrontmatter = frontmatter + `\ntags: ["${tagName}"]`;
+
+					const newFrontmatter = lines.join('\n');
 					const newContent = content.replace(frontmatterRegex, `---\n${newFrontmatter}\n---`);
 					await this.app.vault.modify(file, newContent);
 				}
@@ -686,6 +781,79 @@ export default class LapsePlugin extends Plugin {
 		} catch (error) {
 			console.error('Error adding tag to note:', error);
 		}
+	}
+
+	private normalizeTagValue(tag: string): string {
+		let value = tag.trim();
+		if (value.startsWith('#')) {
+			value = value.substring(1);
+		}
+		return value;
+	}
+
+	private parseTagsBlock(lines: string[], startIndex: number) {
+		const result = {
+			tags: [] as string[],
+			indent: '',
+			endIndex: startIndex + 1
+		};
+
+		const line = lines[startIndex];
+		const indentMatch = line.match(/^(\s*)/);
+		result.indent = indentMatch ? indentMatch[1] : '';
+
+		const trimmed = line.trim();
+		const afterColon = trimmed.replace(/^tags:\s*/i, '');
+
+		const cleanTagValue = (value: string) => value.trim().replace(/^["'#]+|["'#]+$/g, '');
+
+		if (afterColon.startsWith('[')) {
+			const closeBracket = afterColon.lastIndexOf(']');
+			if (closeBracket > 0) {
+				const inside = afterColon.substring(afterColon.indexOf('[') + 1, closeBracket);
+				result.tags.push(
+					...inside
+						.split(',')
+						.map(v => cleanTagValue(v))
+						.filter(v => v.length > 0)
+				);
+			}
+			return result;
+		}
+
+		if (afterColon) {
+			result.tags.push(
+				...afterColon
+					.split(',')
+					.map(v => cleanTagValue(v))
+					.filter(v => v.length > 0)
+			);
+			return result;
+		}
+
+		let idx = startIndex + 1;
+		while (idx < lines.length) {
+			const nextLine = lines[idx];
+			if (!nextLine.trim()) {
+				idx++;
+				continue;
+			}
+			const nextIndent = nextLine.length - nextLine.trimStart().length;
+			if (nextIndent <= result.indent.length) {
+				break;
+			}
+			const nextTrimmed = nextLine.trim();
+			if (nextTrimmed.startsWith('-')) {
+				const value = cleanTagValue(nextTrimmed.substring(1));
+				if (value) {
+					result.tags.push(value);
+				}
+			}
+			idx++;
+		}
+
+		result.endIndex = Math.max(idx, startIndex + 1);
+		return result;
 	}
 
 	async getDefaultLabel(filePath: string): Promise<string> {
@@ -1051,20 +1219,68 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	// Helper to get contrasting text color for a background color
-	getContrastColor(hexColor: string): string {
-		// Remove # if present
-		const hex = hexColor.replace('#', '');
-		
-		// Convert to RGB
-		const r = parseInt(hex.substr(0, 2), 16);
-		const g = parseInt(hex.substr(2, 2), 16);
-		const b = parseInt(hex.substr(4, 2), 16);
-		
-		// Calculate luminance
-		const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-		
-		// Return black or white based on luminance
+	getContrastColor(colorValue: string): string {
+		const rgb = this.resolveColorValue(colorValue);
+		if (!rgb) {
+			return '#ffffff';
+		}
+
+		// Calculate luminance using W3C relative luminance formula
+		const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+
+		// Choose black or white based on luminance
 		return luminance > 0.5 ? '#000000' : '#ffffff';
+	}
+
+	// Ensure we have a hidden element for resolving CSS colors to RGB
+	private ensureColorMeasurementElement(): HTMLElement | null {
+		if (this.colorMeasurementEl) {
+			return this.colorMeasurementEl;
+		}
+
+		if (typeof document === 'undefined') {
+			return null;
+		}
+
+		const el = document.createElement('div');
+		el.style.position = 'fixed';
+		el.style.width = '1px';
+		el.style.height = '1px';
+		el.style.opacity = '0';
+		el.style.pointerEvents = 'none';
+		el.style.zIndex = '-9999';
+		document.body.appendChild(el);
+		this.colorMeasurementEl = el;
+		return el;
+	}
+
+	// Resolve a CSS color string to its RGB components
+	private resolveColorValue(colorValue: string): { r: number; g: number; b: number } | null {
+		const measurementEl = this.ensureColorMeasurementElement();
+		if (!measurementEl) {
+			return null;
+		}
+
+		if (typeof window === 'undefined') {
+			return null;
+		}
+
+		measurementEl.style.backgroundColor = colorValue;
+		const computedColor = window.getComputedStyle(measurementEl).backgroundColor;
+		return this.parseRgbString(computedColor);
+	}
+
+	private parseRgbString(rgbString: string): { r: number; g: number; b: number } | null {
+		const match = rgbString.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+		if (!match || match.length < 4) {
+			return null;
+		}
+
+		return {
+			r: parseInt(match[1], 10),
+			g: parseInt(match[2], 10),
+			b: parseInt(match[3], 10),
+		};
 	}
 
 	// Helper to convert hex color to RGBA with opacity
@@ -1625,7 +1841,15 @@ export default class LapsePlugin extends Plugin {
 				});
 			}
 			
-			return activeTimers;
+			// Deduplicate timers by entry ID to avoid rendering duplicates from race conditions
+			const uniqueTimers = new Map<string, { filePath: string; entry: TimeEntry }>();
+			for (const timer of activeTimers) {
+				if (!uniqueTimers.has(timer.entry.id)) {
+					uniqueTimers.set(timer.entry.id, timer);
+				}
+			}
+
+			return Array.from(uniqueTimers.values());
 		};
 		
 		// Function to render active timers (full render)
@@ -1696,7 +1920,6 @@ export default class LapsePlugin extends Plugin {
 							const now = Date.now();
 							entryInData.endTime = now;
 							entryInData.duration += (now - entryInData.startTime);
-							entryInData.startTime = null;
 							
 							// Update total time
 							pageData.totalTimeTracked = pageData.entries.reduce((sum, e) => sum + e.duration, 0);
@@ -3055,6 +3278,49 @@ export default class LapsePlugin extends Plugin {
 		}
 	}
 
+	formatTimestampForFrontmatter(timestamp: number | null | undefined): string | null {
+		if (timestamp === null || timestamp === undefined) {
+			return null;
+		}
+		return this.formatForDatetimeLocal(timestamp);
+	}
+
+	formatForDatetimeLocal(timestamp: number | null | undefined): string {
+		if (timestamp === null || timestamp === undefined) {
+			return '';
+		}
+		const date = new Date(timestamp);
+		const pad = (value: number) => value.toString().padStart(2, '0');
+		const year = date.getFullYear();
+		const month = pad(date.getMonth() + 1);
+		const day = pad(date.getDate());
+		const hours = pad(date.getHours());
+		const minutes = pad(date.getMinutes());
+		const seconds = pad(date.getSeconds());
+		return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+	}
+
+	parseDatetimeLocal(value: string): number | null {
+		if (!value) {
+			return null;
+		}
+		const normalized = value.trim();
+		const match = normalized.match(
+			/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/
+		);
+		if (!match) {
+			const fallback = new Date(normalized).getTime();
+			return Number.isNaN(fallback) ? null : fallback;
+		}
+		const year = parseInt(match[1], 10);
+		const month = parseInt(match[2], 10) - 1;
+		const day = parseInt(match[3], 10);
+		const hour = parseInt(match[4], 10);
+		const minute = parseInt(match[5], 10);
+		const second = match[6] ? parseInt(match[6], 10) : 0;
+		return new Date(year, month, day, hour, minute, second).getTime();
+	}
+
 	async updateFrontmatter(filePath: string) {
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (!file || !(file instanceof TFile)) return;
@@ -3079,8 +3345,8 @@ export default class LapsePlugin extends Plugin {
 		// Build entries array (all entries - save everything)
 		const entries = pageData.entries.map(entry => ({
 			label: entry.label,
-			start: entry.startTime ? new Date(entry.startTime).toISOString() : null,
-			end: entry.endTime ? new Date(entry.endTime).toISOString() : null,
+			start: this.formatTimestampForFrontmatter(entry.startTime),
+			end: this.formatTimestampForFrontmatter(entry.endTime),
 			duration: Math.floor(entry.duration / 1000),
 			tags: entry.tags || []
 		}));
@@ -3102,11 +3368,13 @@ export default class LapsePlugin extends Plugin {
 		// Build the Lapse frontmatter section as a string
 		let lapseFrontmatter = '';
 		
-		if (startTime !== null) {
-			lapseFrontmatter += `${startTimeKey}: ${new Date(startTime).toISOString()}\n`;
+		const formattedStartTime = this.formatTimestampForFrontmatter(startTime);
+		const formattedEndTime = this.formatTimestampForFrontmatter(endTime);
+		if (formattedStartTime) {
+			lapseFrontmatter += `${startTimeKey}: ${formattedStartTime}\n`;
 		}
-		if (endTime !== null) {
-			lapseFrontmatter += `${endTimeKey}: ${new Date(endTime).toISOString()}\n`;
+		if (formattedEndTime) {
+			lapseFrontmatter += `${endTimeKey}: ${formattedEndTime}\n`;
 		}
 		
 		// Add entries as YAML array
@@ -3143,19 +3411,23 @@ export default class LapsePlugin extends Plugin {
 			let inLapseArray = false;
 			const filteredLines = lines.filter(line => {
 				const trimmed = line.trim();
-				
+				const lineIndent = line.length - line.trimStart().length;
+
 				// Check if entering lapse entries array
 				if (trimmed.startsWith(`${entriesKey}:`)) {
 					inLapseArray = true;
 					return false;
 				}
-				
+
 				// Skip lines inside lapse entries array
 				if (inLapseArray) {
-					if (line.match(/^\s+(-|\w+:)/)) {
-						return false; // Still inside array
+					if (trimmed === '') {
+						return false;
 					}
-					inLapseArray = false; // Exited array
+					if (lineIndent > 0) {
+						return false;
+					}
+					inLapseArray = false;
 				}
 				
 				// Skip other Lapse fields
@@ -3230,6 +3502,24 @@ export default class LapsePlugin extends Plugin {
 		} else {
 			leaf = workspace.getRightLeaf(false);
 			await leaf?.setViewState({ type: 'lapse-buttons', active: true });
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
+	}
+
+	async activateGridView() {
+		const { workspace } = this.app;
+
+		let leaf: WorkspaceLeaf | null = null;
+		const leaves = workspace.getLeavesOfType('lapse-grid');
+
+		if (leaves.length > 0) {
+			leaf = leaves[0];
+		} else {
+			leaf = workspace.getRightLeaf(false);
+			await leaf?.setViewState({ type: 'lapse-grid', active: true });
 		}
 
 		if (leaf) {
@@ -3403,6 +3693,190 @@ export default class LapsePlugin extends Plugin {
 
 		return { entries, project, totalTime };
 	}
+
+	async getTrackedNotesWithEntries(): Promise<NoteEntryGroup[]> {
+		const results: NoteEntryGroup[] = [];
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+
+		for (const file of markdownFiles) {
+			const filePath = file.path;
+			if (this.isFileExcluded(filePath)) {
+				continue;
+			}
+
+			const { entries } = await this.getCachedOrLoadEntries(filePath);
+			if (entries.length > 0) {
+				results.push({ file, entries });
+			}
+		}
+
+		results.sort((a, b) => a.file.path.localeCompare(b.file.path));
+		return results;
+	}
+
+	async getTemplateDataList(): Promise<TemplateData[]> {
+		const templateFolder = this.settings.lapseButtonTemplatesFolder;
+		if (!templateFolder) {
+			return [];
+		}
+
+		const normalizedFolder = templateFolder.endsWith('/') ? templateFolder : `${templateFolder}/`;
+		const files = this.app.vault.getMarkdownFiles();
+		const templates = files.filter(file => file.path.startsWith(normalizedFolder));
+
+		const templateDataList: TemplateData[] = [];
+
+		for (const template of templates) {
+			let project: string | null = null;
+			let projectColor: string | null = null;
+
+			try {
+				const content = await this.app.vault.read(template);
+				const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+				const match = content.match(frontmatterRegex);
+
+				if (match) {
+					const frontmatter = match[1];
+					const lines = frontmatter.split('\n');
+
+					for (const line of lines) {
+						if (line.trim().startsWith(`${this.settings.projectKey}:`)) {
+							project = line.split(':').slice(1).join(':').trim();
+							if (project) {
+								project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
+								project = project.replace(/^["']+|["']+$/g, '');
+								project = project.trim();
+							}
+							break;
+						}
+					}
+				}
+
+				if (project) {
+					projectColor = await this.getProjectColor(project);
+				}
+			} catch (error) {
+				console.error('Error reading template for Quick Start:', error);
+			}
+
+			templateDataList.push({
+				template,
+				templateName: template.basename,
+				project,
+				projectColor
+			});
+		}
+
+		templateDataList.sort((a, b) => a.templateName.localeCompare(b.templateName));
+		return templateDataList;
+	}
+
+	groupTemplateData(templateDataList: TemplateData[]): TemplateGroupResult {
+		const grouped = new Map<string, TemplateData[]>();
+
+		for (const data of templateDataList) {
+			const projectKey = data.project || 'No Project';
+			if (!grouped.has(projectKey)) {
+				grouped.set(projectKey, []);
+			}
+			grouped.get(projectKey)!.push(data);
+		}
+
+		const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
+			if (a === 'No Project') return 1;
+			if (b === 'No Project') return -1;
+			return a.localeCompare(b);
+		});
+
+		return { grouped, sortedProjects };
+	}
+}
+
+async function appendQuickStartButton(container: HTMLElement, plugin: LapsePlugin, data: TemplateData, onNoteCreated?: () => void) {
+	const button = container.createEl('button', { cls: 'lapse-button' }) as HTMLElement;
+	button.setAttribute('type', 'button');
+	
+	// Build button structure with two lines
+	const topLine = button.createDiv({ cls: 'lapse-button-name' }) as HTMLElement;
+	topLine.style.display = 'flex';
+	topLine.style.justifyContent = 'flex-start';
+	topLine.style.alignItems = 'center';
+	topLine.style.gap = '8px';
+	topLine.style.minWidth = '0';
+	
+	const titleEl = topLine.createSpan({ cls: 'lapse-button-title' });
+	titleEl.textContent = data.templateName;
+	titleEl.style.overflow = 'hidden';
+	titleEl.style.textOverflow = 'ellipsis';
+	titleEl.style.whiteSpace = 'nowrap';
+	titleEl.style.flex = '1';
+	titleEl.style.minWidth = '0';
+	titleEl.style.textAlign = 'left';
+	
+	if (plugin.settings.showDurationOnNoteButtons) {
+		try {
+			const duration = await plugin.getTemplateButtonDuration(data.templateName, data.project);
+			if (duration > 0) {
+				const durationText = plugin.formatTimeForButton(duration);
+				const durationEl = topLine.createSpan({ cls: 'lapse-button-duration' });
+				durationEl.textContent = durationText;
+				durationEl.style.flexShrink = '0';
+				durationEl.style.marginLeft = 'auto';
+			}
+		} catch (error) {
+			console.error('Error calculating duration for Quick Start button:', error);
+		}
+	}
+
+	if (data.project) {
+		const projectEl = button.createDiv({ cls: 'lapse-button-project' });
+		projectEl.textContent = data.project;
+		
+		if (data.projectColor) {
+			button.style.borderLeftColor = data.projectColor;
+			projectEl.style.backgroundColor = data.projectColor;
+			projectEl.style.color = plugin.getContrastColor(data.projectColor);
+		}
+	}
+
+	button.onclick = async () => {
+		try {
+			const templateContent = await plugin.app.vault.read(data.template);
+			const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+			const newNoteName = `${data.templateName} ${timestamp}`;
+			const newNotePath = `${newNoteName}.md`;
+
+			const newFile = await plugin.app.vault.create(newNotePath, templateContent);
+			await plugin.app.workspace.getLeaf(false).openFile(newFile);
+			if (onNoteCreated) {
+				onNoteCreated();
+			}
+		} catch (error) {
+			console.error('Error creating note from template:', error);
+		}
+	};
+}
+
+async function renderTemplateGroups(container: HTMLElement, plugin: LapsePlugin, groupResult: TemplateGroupResult, onNoteCreated?: () => void) {
+	for (const projectKey of groupResult.sortedProjects) {
+		const projectTemplates = groupResult.grouped.get(projectKey)!;
+		const projectSection = container.createDiv({ cls: 'lapse-buttons-project-section' });
+		const projectHeader = projectSection.createDiv({ cls: 'lapse-buttons-project-header' });
+	const title = projectHeader.createEl('h3', { text: projectKey, cls: 'lapse-buttons-project-title' }) as HTMLElement;
+		
+		if (projectKey !== 'No Project') {
+			const projectColor = projectTemplates[0].projectColor;
+			if (projectColor) {
+				projectHeader.style.borderLeftColor = projectColor;
+				title.style.color = projectColor;
+			}
+		}
+		
+		const buttonsGrid = projectSection.createDiv({ cls: 'lapse-buttons-grid' });
+		for (const data of projectTemplates) {
+			await appendQuickStartButton(buttonsGrid, plugin, data, onNoteCreated);
+		}
+	}
 }
 
 class LapseSidebarView extends ItemView {
@@ -3436,7 +3910,7 @@ class LapseSidebarView extends ItemView {
 	}
 
 	async render() {
-		const container = this.containerEl.children[1];
+		const container = this.containerEl.children[1] as HTMLElement;
 		container.empty();
 		this.timeDisplays.clear();
 		
@@ -3478,6 +3952,15 @@ class LapseSidebarView extends ItemView {
 			// Force reload of all entries in view
 			this.plugin.timeData.clear();
 			await this.render();
+		};
+
+		const addBtn = headerButtons.createEl('button', {
+			cls: 'lapse-sidebar-add-btn clickable-icon',
+			attr: { 'aria-label': 'Start a new timer' }
+		});
+		setIcon(addBtn, 'plus');
+		addBtn.onclick = () => {
+			new LapseQuickStartModal(this.app, this.plugin).open();
 		};
 
 		// Get active timers from memory only (not all files) for faster rendering
@@ -3527,7 +4010,6 @@ class LapseSidebarView extends ItemView {
 							const now = Date.now();
 							entryInData.endTime = now;
 							entryInData.duration += (now - entryInData.startTime);
-							entryInData.startTime = null;
 							
 							// Update total time
 							pageData.totalTimeTracked = pageData.entries.reduce((sum, e) => sum + e.duration, 0);
@@ -4019,6 +4501,209 @@ class LapseSidebarView extends ItemView {
 	}
 }
 
+class LapseQuickStartModal extends Modal {
+	plugin: LapsePlugin;
+
+	constructor(app: App, plugin: LapsePlugin) {
+		super(app);
+		this.plugin = plugin;
+	}
+
+	async onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass('lapse-quick-start-modal');
+		contentEl.createEl('h2', { text: 'Quick Start' });
+
+		try {
+			const templateDataList = await this.plugin.getTemplateDataList();
+			if (templateDataList.length === 0) {
+				contentEl.createEl('p', {
+					text: `No templates found in ${this.plugin.settings.lapseButtonTemplatesFolder}`,
+					cls: 'mod-warning'
+				});
+				return;
+			}
+
+			const groupResult = this.plugin.groupTemplateData(templateDataList);
+			await renderTemplateGroups(contentEl, this.plugin, groupResult, () => this.close());
+		} catch (error) {
+			console.error('Error rendering Quick Start modal:', error);
+			contentEl.createEl('p', { text: 'Unable to load templates', cls: 'mod-warning' });
+		}
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class LapseGridView extends ItemView {
+	plugin: LapsePlugin;
+
+	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
+		super(leaf);
+		this.plugin = plugin;
+	}
+
+	getViewType(): string {
+		return 'lapse-grid';
+	}
+
+	getDisplayText(): string {
+		return 'Entry Grid';
+	}
+
+	getIcon(): string {
+		return 'table';
+	}
+
+	async onOpen() {
+		await this.render();
+	}
+
+	async render() {
+		const container = this.containerEl.children[1] as HTMLElement;
+		container.empty();
+		container.addClass('lapse-grid-view');
+
+		const header = container.createDiv({ cls: 'lapse-grid-header' });
+		header.createEl('h2', { text: 'Entry Grid' });
+
+		const headerButtons = header.createDiv({ cls: 'lapse-grid-header-buttons' });
+		const refreshBtn = headerButtons.createEl('button', {
+			cls: 'lapse-grid-refresh-btn clickable-icon',
+			attr: { 'aria-label': 'Refresh grid' }
+		});
+		setIcon(refreshBtn, 'refresh-cw');
+		refreshBtn.onclick = async () => {
+			await this.render();
+		};
+
+		const groups = await this.plugin.getTrackedNotesWithEntries();
+		if (groups.length === 0) {
+			container.createEl('p', {
+				text: 'No tracked Lapse entries found.',
+				cls: 'lapse-grid-empty'
+			});
+			return;
+		}
+
+		for (const { file, entries } of groups) {
+			const noteSection = container.createDiv({ cls: 'lapse-grid-note-section' });
+			const noteHeader = noteSection.createDiv({ cls: 'lapse-grid-note-header' });
+			const title = noteHeader.createEl('a', {
+				text: file.basename,
+				href: file.path,
+				cls: 'internal-link'
+			});
+			title.onclick = (event) => {
+				event.preventDefault();
+				this.app.workspace.openLinkText(file.path, '', false);
+			};
+			noteHeader.createSpan({
+				text: `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`,
+				cls: 'lapse-grid-note-count'
+			});
+
+			const table = noteSection.createDiv({ cls: 'lapse-grid-table' });
+			const headerRow = table.createDiv({ cls: 'lapse-grid-entry-row lapse-grid-entry-header' });
+			['Label', 'Start', 'End', 'Tags'].forEach(text => {
+				headerRow.createDiv({ text, cls: 'lapse-grid-entry-cell lapse-grid-entry-cell-header' });
+			});
+
+			const sortedEntries = [...entries].sort((a, b) => {
+				const aStart = a.startTime ?? 0;
+				const bStart = b.startTime ?? 0;
+				return bStart - aStart;
+			});
+			let rowIndex = 0;
+			for (const entry of sortedEntries) {
+				const row = table.createDiv({ cls: 'lapse-grid-entry-row' });
+				row.addClass(rowIndex % 2 === 0 ? 'lapse-grid-row-even' : 'lapse-grid-row-odd');
+				rowIndex++;
+				const labelCell = row.createDiv({ cls: 'lapse-grid-entry-cell' });
+				const labelInput = labelCell.createEl('input', {
+					type: 'text',
+					value: entry.label,
+					cls: 'lapse-grid-input'
+				}) as HTMLInputElement;
+
+				const startCell = row.createDiv({ cls: 'lapse-grid-entry-cell' });
+				const startInput = startCell.createEl('input', {
+					type: 'datetime-local',
+					value: this.plugin.formatForDatetimeLocal(entry.startTime),
+					cls: 'lapse-grid-input',
+					attr: { step: '1' }
+				}) as HTMLInputElement;
+
+				const endCell = row.createDiv({ cls: 'lapse-grid-entry-cell' });
+				const endInput = endCell.createEl('input', {
+					type: 'datetime-local',
+					value: this.plugin.formatForDatetimeLocal(entry.endTime),
+					cls: 'lapse-grid-input',
+					attr: { step: '1' }
+				}) as HTMLInputElement;
+
+				const tagsCell = row.createDiv({ cls: 'lapse-grid-entry-cell' });
+				const tagsInput = tagsCell.createEl('input', {
+					type: 'text',
+					value: (entry.tags || []).join(', '),
+					cls: 'lapse-grid-input',
+					attr: { placeholder: 'tag1, tag2' }
+				}) as HTMLInputElement;
+
+				let isSaving = false;
+				const commitChanges = async () => {
+					if (isSaving) return;
+					isSaving = true;
+					try {
+						entry.label = labelInput.value;
+						entry.startTime = this.plugin.parseDatetimeLocal(startInput.value);
+						entry.endTime = this.plugin.parseDatetimeLocal(endInput.value);
+
+						if (entry.startTime !== null && entry.endTime !== null) {
+							entry.duration = Math.max(0, entry.endTime - entry.startTime);
+						}
+
+						const parsedTags = tagsInput.value
+							.split(',')
+							.map(tag => tag.trim().replace(/^#/, ''))
+							.filter(tag => tag.length > 0);
+						entry.tags = parsedTags;
+
+						await this.plugin.updateFrontmatter(file.path);
+						const pageData = this.plugin.timeData.get(file.path);
+						if (pageData) {
+							pageData.totalTimeTracked = pageData.entries.reduce((sum, e) => sum + e.duration, 0);
+						}
+						this.plugin.invalidateCacheForFile(file.path);
+					} finally {
+						isSaving = false;
+					}
+				};
+
+				const bindCommit = (input: HTMLInputElement, eventName: 'blur' | 'change') => {
+					input.addEventListener(eventName, () => {
+						void commitChanges();
+					});
+					input.addEventListener('keydown', (event) => {
+						if (event.key === 'Enter') {
+							event.preventDefault();
+							input.blur();
+						}
+					});
+				};
+
+				bindCommit(labelInput, 'blur');
+				bindCommit(tagsInput, 'blur');
+				bindCommit(startInput, 'change');
+				bindCommit(endInput, 'change');
+			}
+		}
+	}
+}
+
 class LapseButtonsView extends ItemView {
 	plugin: LapsePlugin;
 
@@ -4048,7 +4733,7 @@ class LapseButtonsView extends ItemView {
 	}
 
 	async render() {
-		const container = this.containerEl.children[1];
+		const container = this.containerEl.children[1] as HTMLElement;
 		container.empty();
 		container.addClass('lapse-buttons-view');
 
@@ -4070,12 +4755,11 @@ class LapseButtonsView extends ItemView {
 			await this.render();
 		};
 
-		// Get all template files from the configured folder
+		// Get pre-built template data
 		const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
-		const files = this.app.vault.getMarkdownFiles();
-		const templates = files.filter(file => file.path.startsWith(templateFolder + '/'));
+		const templateDataList = await this.plugin.getTemplateDataList();
 
-		if (templates.length === 0) {
+		if (templateDataList.length === 0) {
 			container.createEl('p', { 
 				text: `No templates found in ${templateFolder}. Configure your template folder in Lapse settings.`,
 				cls: 'lapse-buttons-empty'
@@ -4083,175 +4767,8 @@ class LapseButtonsView extends ItemView {
 			return;
 		}
 
-		// Read all templates and group by project
-		interface TemplateData {
-			template: TFile;
-			templateName: string;
-			project: string | null;
-			projectColor: string | null;
-		}
-
-		const templateDataList: TemplateData[] = [];
-
-		for (const template of templates) {
-			const templateName = template.basename;
-			let project: string | null = null;
-			let projectColor: string | null = null;
-			
-			try {
-				const content = await this.app.vault.read(template);
-				const frontmatterRegex = /---\n([\s\S]*?)\n---/;
-				const match = content.match(frontmatterRegex);
-				
-				if (match) {
-					const frontmatter = match[1];
-					const lines = frontmatter.split('\n');
-					
-					for (const line of lines) {
-						if (line.trim().startsWith(this.plugin.settings.projectKey + ':')) {
-							project = line.split(':').slice(1).join(':').trim();
-							if (project) {
-								project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
-								project = project.replace(/^["']+|["']+$/g, '');
-								project = project.trim();
-							}
-							break;
-						}
-					}
-				}
-				
-				// Get project color
-				if (project) {
-					projectColor = await this.plugin.getProjectColor(project);
-				}
-			} catch (error) {
-				console.error('Error reading template:', error);
-			}
-
-			templateDataList.push({
-				template,
-				templateName,
-				project,
-				projectColor
-			});
-		}
-
-		// Group templates by project
-		const grouped = new Map<string, TemplateData[]>();
-		for (const data of templateDataList) {
-			const projectKey = data.project || 'No Project';
-			if (!grouped.has(projectKey)) {
-				grouped.set(projectKey, []);
-			}
-			grouped.get(projectKey)!.push(data);
-		}
-
-		// Sort projects: named projects first (alphabetically), then "No Project"
-		const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
-			if (a === 'No Project') return 1;
-			if (b === 'No Project') return -1;
-			return a.localeCompare(b);
-		});
-
-		// Render each project group
-		for (const projectKey of sortedProjects) {
-			const projectTemplates = grouped.get(projectKey)!;
-			
-			// Project header
-			const projectSection = container.createDiv({ cls: 'lapse-buttons-project-section' });
-			const projectHeader = projectSection.createDiv({ cls: 'lapse-buttons-project-header' });
-			
-			if (projectKey !== 'No Project') {
-				// Get project color for the first template (they should all have same project)
-				const projectColor = projectTemplates[0].projectColor;
-				
-				projectHeader.createEl('h3', { 
-					text: projectKey,
-					cls: 'lapse-buttons-project-title'
-				});
-				
-				if (projectColor) {
-					projectHeader.style.borderLeftColor = projectColor;
-					projectHeader.querySelector('h3')!.style.color = projectColor;
-				}
-			} else {
-				projectHeader.createEl('h3', { 
-					text: projectKey,
-					cls: 'lapse-buttons-project-title'
-				});
-			}
-
-			// Grid of buttons for this project
-			const buttonsGrid = projectSection.createDiv({ cls: 'lapse-buttons-grid' });
-
-			// Create buttons for each template in this project
-			for (const data of projectTemplates) {
-				const button = buttonsGrid.createEl('button', { cls: 'lapse-button' });
-				
-				// Build button structure with title and duration
-				const topLine = button.createDiv({ cls: 'lapse-button-name' });
-				topLine.style.display = 'flex';
-				topLine.style.justifyContent = 'flex-start';
-				topLine.style.alignItems = 'center';
-				topLine.style.gap = '8px';
-				topLine.style.minWidth = '0';
-				
-				// Title element (will truncate if needed)
-				const titleEl = topLine.createSpan({ cls: 'lapse-button-title' });
-				titleEl.textContent = data.templateName;
-				titleEl.style.overflow = 'hidden';
-				titleEl.style.textOverflow = 'ellipsis';
-				titleEl.style.whiteSpace = 'nowrap';
-				titleEl.style.flex = '1';
-				titleEl.style.minWidth = '0';
-				titleEl.style.textAlign = 'left';
-				
-				// Calculate and display duration if enabled
-				if (this.plugin.settings.showDurationOnNoteButtons) {
-					try {
-						const duration = await this.plugin.getTemplateButtonDuration(data.templateName, data.project);
-						if (duration > 0) {
-							const durationText = this.plugin.formatTimeForButton(duration);
-							const durationEl = topLine.createSpan({ cls: 'lapse-button-duration' });
-							durationEl.textContent = durationText;
-							durationEl.style.flexShrink = '0';
-							durationEl.style.marginLeft = 'auto';
-						}
-					} catch (error) {
-						console.error('Error calculating duration for Quick Start button:', error);
-					}
-				}
-				
-				// Project pill if exists
-				if (data.project) {
-					const projectEl = button.createDiv({ cls: 'lapse-button-project' });
-					projectEl.textContent = data.project;
-					
-					// Apply colors
-					if (data.projectColor) {
-						button.style.borderLeftColor = data.projectColor;
-						projectEl.style.backgroundColor = data.projectColor;
-						const contrastColor = this.plugin.getContrastColor(data.projectColor);
-						projectEl.style.color = contrastColor;
-					}
-				}
-
-				// Click handler - create new note from template
-				button.onclick = async () => {
-					try {
-						const templateContent = await this.app.vault.read(data.template);
-						const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-						const newNoteName = `${data.templateName} ${timestamp}`;
-						const newNotePath = `${newNoteName}.md`;
-						
-						const newFile = await this.app.vault.create(newNotePath, templateContent);
-						await this.app.workspace.getLeaf(false).openFile(newFile);
-					} catch (error) {
-						console.error('Error creating note from template:', error);
-					}
-				};
-			}
-		}
+		const groupResult = this.plugin.groupTemplateData(templateDataList);
+		await renderTemplateGroups(container, this.plugin, groupResult);
 	}
 }
 

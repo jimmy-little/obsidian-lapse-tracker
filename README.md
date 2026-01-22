@@ -10,6 +10,7 @@ A lightweight, powerful time tracking plugin for Obsidian that combines elegant 
 - **Frontmatter Integration**: Automatically updates note frontmatter with tracking data
 - **Activity Monitoring**: Real-time sidebar view showing all running timers across your vault
 - **Card-Based Entry View**: Modern, mobile-friendly card layout for viewing and managing entries
+- **Editable Entry Grid**: Inspect every note's entries grouped by note and edit labels, timestamps, and tags inline right from the grid view
 
 ### Reporting & Analytics
 - **Inline Report Queries**: Create custom filtered reports directly in your notes with simple query syntax
@@ -82,6 +83,12 @@ This shows a clean, single-line view for each active timer with:
 - **Stop button** - Stops the timer without opening the note
 
 Perfect for creating a dashboard note to monitor all active work across your vault.
+
+### Entry Grid
+
+Open the entry grid via the table icon in the ribbon or the Command Palette command `Lapse: Show entry grid`. It renders every tracked note with its time entries listed below; each row exposes editable fields for the label, start/end timestamps, and tags so you can keep everything in sync without opening the source note.
+
+Changes save directly back to the note's Lapse frontmatter, making the grid handy for bulk edits or cleanup.
 
 ### Lapse Buttons
 
@@ -219,12 +226,16 @@ chart: pie
 - **Activity Sidebar**: Click the clock icon in the ribbon or use Command Palette → "Lapse: Show activity"
 - **Time Reports**: Click the bar chart icon in the ribbon or use Command Palette → "Lapse: Show time reports"
 
+**Panel Views:**
+- **Entry Grid**: Click the table icon in the ribbon or run Command Palette → "Lapse: Show entry grid" to open the editable entry grid view
+
 **Available Commands:**
 - `Lapse: Add time tracker` - Insert a `lapse` code block at cursor
 - `Lapse: Add and start time tracker` - Insert a `lapse` code block and immediately start the timer
 - `Lapse: Quick start timer` - Toggle timer in current note (start/stop)
 - `Lapse: Show activity` - Open Activity sidebar
 - `Lapse: Show time reports` - Open Time Reports view
+- `Lapse: Show entry grid` - Open the editable entry grid view
 
 ## Installation
 
