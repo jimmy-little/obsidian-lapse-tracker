@@ -1,7 +1,7 @@
 {
   "id": "lapse-tracker",
   "name": "Lapse",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "minAppVersion": "0.15.0",
   "description": "Compact time tracker with code block integration, frontmatter updates, and active timer monitoring",
   "author": "Jimmy Little",
