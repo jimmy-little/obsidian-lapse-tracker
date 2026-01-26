@@ -1,6 +1,6 @@
 {
   "name": "obsidian-lapse-tracker",
-  "version": "0.1.0",
+  "version": "0.1.8",
   "description": "Compact time tracker for Obsidian with code block integration and sidebar monitoring",
   "main": "main.js",
   "scripts": {
