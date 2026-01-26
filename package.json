@@ -8,7 +8,10 @@
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "install": "npm run build && node install.mjs",
     "version": "node version-bump.mjs && git add manifest.json versions.json",
-    "release-zip": "node create-release-zip.mjs"
+    "release-zip": "node create-release-zip.mjs",
+    "release": "node release.mjs",
+    "release:minor": "node release.mjs --minor",
+    "release:major": "node release.mjs --major"
   },
   "keywords": [
     "obsidian",

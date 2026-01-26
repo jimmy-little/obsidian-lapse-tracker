@@ -250,12 +250,14 @@ export default class LapsePlugin extends Plugin {
 				if (!hasActiveTimer) {
 					// Get default label
 					const label = await this.getDefaultLabel(filePath);
+					const now = Date.now();
+					const entryIndex = pageData?.entries.length || 0;
 					
-					// Create new timer entry
+					// Create new timer entry with stable ID matching loaded format
 					const newEntry: TimeEntry = {
-						id: `${filePath}-${Date.now()}-${Math.random()}`,
+						id: `${filePath}-${entryIndex}-${now}`,
 						label: label,
-						startTime: Date.now(),
+						startTime: now,
 						endTime: null,
 						duration: 0,
 						isPaused: false,
@@ -324,10 +326,12 @@ export default class LapsePlugin extends Plugin {
 				} else {
 					// Start a new timer
 					const label = await this.getDefaultLabel(filePath);
+					const now = Date.now();
+					const entryIndex = pageData?.entries.length || 0;
 					const newEntry: TimeEntry = {
-						id: `${filePath}-${Date.now()}-${Math.random()}`,
+						id: `${filePath}-${entryIndex}-${now}`,
 						label: label,
-						startTime: Date.now(),
+						startTime: now,
 						endTime: null,
 						duration: 0,
 						isPaused: false,
@@ -529,10 +533,12 @@ export default class LapsePlugin extends Plugin {
 					if (trimmed && indent === 0 && !trimmed.startsWith('-')) {
 						// Save current entry if exists
 						if (currentEntry) {
+							const startTime = parseTimestampValue(currentEntry.start);
 							entries.push({
-								id: `${filePath}-${entries.length}-${Date.now()}`,
+								// Use stable ID based on file + index + start time (not Date.now())
+								id: `${filePath}-${entries.length}-${startTime || 'nostart'}`,
 								label: currentEntry.label || 'Untitled',
-								startTime: parseTimestampValue(currentEntry.start),
+								startTime: startTime,
 								endTime: parseTimestampValue(currentEntry.end),
 								duration: (currentEntry.duration || 0) * 1000,
 								isPaused: false,
@@ -548,10 +554,12 @@ export default class LapsePlugin extends Plugin {
 					if (trimmed.startsWith('- label:')) {
 						// Save previous entry if exists
 						if (currentEntry) {
+							const startTime = parseTimestampValue(currentEntry.start);
 							entries.push({
-								id: `${filePath}-${entries.length}-${Date.now()}`,
+								// Use stable ID based on file + index + start time (not Date.now())
+								id: `${filePath}-${entries.length}-${startTime || 'nostart'}`,
 								label: currentEntry.label || 'Untitled',
-								startTime: parseTimestampValue(currentEntry.start),
+								startTime: startTime,
 								endTime: parseTimestampValue(currentEntry.end),
 								duration: (currentEntry.duration || 0) * 1000,
 								isPaused: false,
@@ -623,10 +631,12 @@ export default class LapsePlugin extends Plugin {
 
 			// Add last entry if exists
 			if (currentEntry) {
+				const startTime = parseTimestampValue(currentEntry.start);
 				entries.push({
-					id: `${filePath}-${entries.length}-${Date.now()}`,
+					// Use stable ID based on file + index + start time (not Date.now())
+					id: `${filePath}-${entries.length}-${startTime || 'nostart'}`,
 					label: currentEntry.label || 'Untitled',
-					startTime: parseTimestampValue(currentEntry.start),
+					startTime: startTime,
 					endTime: parseTimestampValue(currentEntry.end),
 					duration: (currentEntry.duration || 0) * 1000,
 					isPaused: false,
@@ -662,27 +672,33 @@ export default class LapsePlugin extends Plugin {
 					}
 				}
 
-				// Create synthetic entry from top-level times if we have at least a start time
-				if (topLevelStart) {
+				// Create synthetic entry from top-level times only if BOTH start AND end exist
+				// (completed entries only - not active timers)
+				if (topLevelStart && topLevelEnd) {
 					const parsedStart = parseTimestampValue(topLevelStart);
 					const parsedEnd = parseTimestampValue(topLevelEnd);
-					const duration = (parsedStart && parsedEnd) ? Math.max(0, parsedEnd - parsedStart) : 0;
 					
-					// Use filename as label
-					const noteName = file.basename;
-					const label = this.settings.removeTimestampFromFileName 
-						? this.removeTimestampFromFileName(noteName) 
-						: noteName;
+					// Only create if both parsed successfully
+					if (parsedStart && parsedEnd) {
+						const duration = Math.max(0, parsedEnd - parsedStart);
+						
+						// Use filename as label
+						const noteName = file.basename;
+						const label = this.settings.removeTimestampFromFileName 
+							? this.removeTimestampFromFileName(noteName) 
+							: noteName;
 
-					entries.push({
-						id: `${filePath}-fallback-${Date.now()}`,
-						label: label,
-						startTime: parsedStart,
-						endTime: parsedEnd,
-						duration: duration,
-						isPaused: false,
-						tags: topLevelTags
-					});
+						entries.push({
+							// Use stable ID based on file + start time (not Date.now())
+							id: `${filePath}-fallback-${parsedStart}`,
+							label: label,
+							startTime: parsedStart,
+							endTime: parsedEnd,
+							duration: duration,
+							isPaused: false,
+							tags: topLevelTags
+						});
+					}
 				}
 			}
 
@@ -1641,10 +1657,12 @@ export default class LapsePlugin extends Plugin {
 				// Get default label based on settings
 				label = await this.getDefaultLabel(filePath);
 			}
+			const now = Date.now();
+			const entryIndex = pageData.entries.length;
 			const newEntry: TimeEntry = {
-				id: `${filePath}-${Date.now()}-${Math.random()}`,
+				id: `${filePath}-${entryIndex}-${now}`,
 				label: label,
-				startTime: Date.now(),
+				startTime: now,
 				endTime: null,
 				duration: 0,
 				isPaused: false,
@@ -1708,8 +1726,9 @@ export default class LapsePlugin extends Plugin {
 		};
 
 		addButton.onclick = async () => {
+			const entryIndex = pageData.entries.length;
 			const newEntry: TimeEntry = {
-				id: `${filePath}-${Date.now()}-${Math.random()}`,
+				id: `${filePath}-${entryIndex}-nostart`,
 				label: 'New Entry',
 				startTime: null,
 				endTime: null,
@@ -2985,7 +3004,7 @@ export default class LapsePlugin extends Plugin {
 	renderEntryCards(cardsContainer: HTMLElement, entries: TimeEntry[], filePath: string, labelDisplay?: HTMLElement, labelInput?: HTMLInputElement | null) {
 		cardsContainer.empty();
 
-		entries.forEach((entry) => {
+		entries.forEach((entry, index) => {
 			const card = cardsContainer.createDiv({ cls: 'lapse-entry-card' });
 			
 			// Top line: label and action buttons
@@ -3033,8 +3052,10 @@ export default class LapsePlugin extends Plugin {
 			}
 
 			// Edit button handler - opens modal
+			// Capture the entry index for stable lookup
+			const entryIndex = index;
 			editBtn.onclick = async () => {
-				await this.showEditModal(entry, filePath, labelDisplay, labelInput, () => {
+				await this.showEditModal(entryIndex, filePath, labelDisplay, labelInput, () => {
 					// Refresh cards after edit
 					const pageData = this.timeData.get(filePath);
 					if (pageData) {
@@ -3048,9 +3069,13 @@ export default class LapsePlugin extends Plugin {
 				const confirmed = await this.showDeleteConfirmation(entry.label);
 				if (confirmed) {
 					const pageData = this.timeData.get(filePath);
-					if (pageData) {
-						pageData.entries = pageData.entries.filter(e => e.id !== entry.id);
+					if (pageData && entryIndex >= 0 && entryIndex < pageData.entries.length) {
+						// Remove entry by index for stability
+						pageData.entries.splice(entryIndex, 1);
+						pageData.totalTimeTracked = pageData.entries.reduce((sum, e) => sum + e.duration, 0);
 						await this.updateFrontmatter(filePath);
+						// Invalidate cache so other views see the change
+						this.invalidateCacheForFile(filePath);
 						this.renderEntryCards(cardsContainer, pageData.entries, filePath, labelDisplay, labelInput);
 					}
 				}
@@ -3058,7 +3083,15 @@ export default class LapsePlugin extends Plugin {
 		});
 	}
 
-	async showEditModal(entry: TimeEntry, filePath: string, labelDisplay?: HTMLElement, labelInputParam?: HTMLInputElement | null, onSave?: () => void) {
+	async showEditModal(entryIndex: number, filePath: string, labelDisplay?: HTMLElement, labelInputParam?: HTMLInputElement | null, onSave?: () => void) {
+		// Get the entry from pageData using the index
+		const pageData = this.timeData.get(filePath);
+		if (!pageData || entryIndex < 0 || entryIndex >= pageData.entries.length) {
+			console.error('Invalid entry index or no pageData', entryIndex, filePath);
+			return;
+		}
+		const entry = pageData.entries[entryIndex];
+		
 		const modal = new Modal(this.app);
 		modal.titleEl.setText('Edit Entry');
 		
@@ -3127,15 +3160,15 @@ export default class LapsePlugin extends Plugin {
 
 		// Update duration when start/end change
 		const updateDuration = () => {
-			const start = startInput.value ? new Date(startInput.value).getTime() : null;
-			const end = endInput.value ? new Date(endInput.value).getTime() : null;
+			const start = this.parseDatetimeLocal(startInput.value);
+			const end = this.parseDatetimeLocal(endInput.value);
 			if (start && end) {
-				const duration = end - start;
+				const duration = Math.max(0, end - start);
 				durationInput.value = this.formatTimeAsHHMMSS(duration);
 			} else if (entry.startTime && !entry.endTime) {
 				// Active timer - keep existing duration
 				durationInput.value = this.formatTimeAsHHMMSS(entry.duration);
-				} else {
+			} else {
 				durationInput.value = this.formatTimeAsHHMMSS(entry.duration);
 			}
 		};
@@ -3145,52 +3178,64 @@ export default class LapsePlugin extends Plugin {
 
 		// Save handler
 		saveBtn.onclick = async () => {
-			entry.label = labelInput.value;
-					
-					if (startInput.value) {
-						entry.startTime = new Date(startInput.value).getTime();
-					} else {
-						entry.startTime = null;
-					}
-					
-					if (endInput.value) {
-						entry.endTime = new Date(endInput.value).getTime();
-					} else {
-						entry.endTime = null;
-					}
+			// Get fresh reference to pageData and entry by index
+			const currentPageData = this.timeData.get(filePath);
+			if (!currentPageData || entryIndex < 0 || entryIndex >= currentPageData.entries.length) {
+				console.error('Invalid entry index or no pageData on save', entryIndex, filePath);
+				modal.close();
+				return;
+			}
+			
+			const entryInData = currentPageData.entries[entryIndex];
+			
+			// Update the entry in pageData
+			entryInData.label = labelInput.value;
+			
+			// Use parseDatetimeLocal to correctly handle local timezone
+			entryInData.startTime = this.parseDatetimeLocal(startInput.value);
+			entryInData.endTime = this.parseDatetimeLocal(endInput.value);
+			
+			// Update the entry ID to match new start time (for consistency)
+			entryInData.id = `${filePath}-${entryIndex}-${entryInData.startTime || 'nostart'}`;
 
 			// Parse tags (remove # if present, split by comma)
 			const tagsStr = tagsInput.value.trim();
 			if (tagsStr) {
-				entry.tags = tagsStr.split(',').map(t => {
+				entryInData.tags = tagsStr.split(',').map(t => {
 					t = t.trim();
 					// Remove # if present
 					return t.startsWith('#') ? t.substring(1) : t;
 				}).filter(t => t);
 			} else {
-				entry.tags = [];
-					}
+				entryInData.tags = [];
+			}
 
-					// Calculate duration from start and end times
-					if (entry.startTime && entry.endTime) {
-						entry.duration = entry.endTime - entry.startTime;
-					} else if (entry.startTime && !entry.endTime) {
-						// Active timer - preserve existing duration
-						// Don't recalculate
-					}
+			// Calculate duration from start and end times
+			if (entryInData.startTime && entryInData.endTime) {
+				entryInData.duration = Math.max(0, entryInData.endTime - entryInData.startTime);
+			} else if (entryInData.startTime && !entryInData.endTime) {
+				// Active timer - preserve existing duration
+				// Don't recalculate
+			}
 
-					// Update action bar label if this is the active timer
-					const isActiveTimer = entry.startTime !== null && entry.endTime === null;
-					if (isActiveTimer && labelDisplay) {
+			// Update action bar label if this is the active timer
+			const isActiveTimer = entryInData.startTime !== null && entryInData.endTime === null;
+			if (isActiveTimer && labelDisplay) {
 				if (labelInputParam) {
-					labelInputParam.value = entry.label;
-						} else {
-							labelDisplay.setText(entry.label);
-						}
-					}
+					labelInputParam.value = entryInData.label;
+				} else {
+					labelDisplay.setText(entryInData.label);
+				}
+			}
 
-					// Update frontmatter
-					await this.updateFrontmatter(filePath);
+			// Update in-memory totalTimeTracked
+			currentPageData.totalTimeTracked = currentPageData.entries.reduce((sum, e) => sum + e.duration, 0);
+
+			// Update frontmatter
+			await this.updateFrontmatter(filePath);
+			
+			// Invalidate cache so reports see fresh data
+			this.invalidateCacheForFile(filePath);
 					
 			modal.close();
 			if (onSave) {
@@ -5319,7 +5364,49 @@ class LapseReportsView extends ItemView {
 			const isExpanded = this.expandedGroups.has(groupId);
 			setIcon(expandBtn, isExpanded ? 'chevron-down' : 'chevron-right');
 			
-			row.createEl('td', { text: item.group, cls: 'lapse-reports-group-name' });
+			// Group name cell - make clickable for note/project grouping
+			const groupNameCell = row.createEl('td', { cls: 'lapse-reports-group-name' });
+			if (this.groupBy === 'note' && item.entries.length > 0) {
+				// Link to the note file
+				const filePath = item.entries[0].filePath;
+				const link = groupNameCell.createEl('a', { 
+					text: item.group, 
+					cls: 'internal-link',
+					href: filePath
+				});
+				link.onclick = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					this.app.workspace.openLinkText(filePath, '', false);
+				};
+			} else if (this.groupBy === 'project') {
+				// Try to link to the project file
+				const projectFile = this.app.metadataCache.getFirstLinkpathDest(item.group, '');
+				if (projectFile && projectFile instanceof TFile) {
+					const projectColor = await this.plugin.getProjectColor(item.group);
+					const link = groupNameCell.createEl('a', { 
+						text: item.group, 
+						cls: 'internal-link',
+						href: projectFile.path
+					});
+					if (projectColor) {
+						link.style.color = projectColor;
+					}
+					link.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						this.app.workspace.openLinkText(projectFile.path, '', false);
+					};
+				} else {
+					const projectColor = await this.plugin.getProjectColor(item.group);
+					const span = groupNameCell.createSpan({ text: item.group });
+					if (projectColor) {
+						span.style.color = projectColor;
+					}
+				}
+			} else {
+				groupNameCell.setText(item.group);
+			}
 			
 			// Aggregate project/tags for group
 			const projects = new Set(item.entries.map(e => e.project).filter(p => p));
@@ -5332,9 +5419,27 @@ class LapseReportsView extends ItemView {
 				for (let i = 0; i < projectArray.length; i++) {
 					const projectName = projectArray[i];
 					const projectColor = await this.plugin.getProjectColor(projectName);
-					const projectSpan = projectCell.createSpan({ text: projectName });
-					if (projectColor) {
-						projectSpan.style.color = projectColor;
+					const projectFile = this.app.metadataCache.getFirstLinkpathDest(projectName, '');
+					
+					if (projectFile && projectFile instanceof TFile) {
+						const link = projectCell.createEl('a', { 
+							text: projectName, 
+							cls: 'internal-link',
+							href: projectFile.path
+						});
+						if (projectColor) {
+							link.style.color = projectColor;
+						}
+						link.onclick = (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							this.app.workspace.openLinkText(projectFile.path, '', false);
+						};
+					} else {
+						const projectSpan = projectCell.createSpan({ text: projectName });
+						if (projectColor) {
+							projectSpan.style.color = projectColor;
+						}
 					}
 					if (i < projectArray.length - 1) {
 						projectCell.createSpan({ text: ', ' });
@@ -5377,9 +5482,27 @@ class LapseReportsView extends ItemView {
 							for (let i = 0; i < subProjectArray.length; i++) {
 								const projectName = subProjectArray[i];
 								const projectColor = await this.plugin.getProjectColor(projectName);
-								const projectSpan = subProjectCell.createSpan({ text: projectName });
-								if (projectColor) {
-									projectSpan.style.color = projectColor;
+								const projectFile = this.app.metadataCache.getFirstLinkpathDest(projectName, '');
+								
+								if (projectFile && projectFile instanceof TFile) {
+									const link = subProjectCell.createEl('a', { 
+										text: projectName, 
+										cls: 'internal-link',
+										href: projectFile.path
+									});
+									if (projectColor) {
+										link.style.color = projectColor;
+									}
+									link.onclick = (e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										this.app.workspace.openLinkText(projectFile.path, '', false);
+									};
+								} else {
+									const projectSpan = subProjectCell.createSpan({ text: projectName });
+									if (projectColor) {
+										projectSpan.style.color = projectColor;
+									}
 								}
 								if (i < subProjectArray.length - 1) {
 									subProjectCell.createSpan({ text: ', ' });
@@ -5394,16 +5517,34 @@ class LapseReportsView extends ItemView {
 					}
 				} else {
 					// Show individual entries
-					for (const { entry, noteName, project } of item.entries) {
+					for (const { entry, noteName, project, filePath } of item.entries) {
 						const entryRow = tbody.createEl('tr', { cls: 'lapse-reports-entry-row' });
 						entryRow.createEl('td'); // Empty expand cell
 						entryRow.createEl('td', { text: `  ${entry.label}`, cls: 'lapse-reports-entry-label' });
 						const entryProjectCell = entryRow.createEl('td');
 						if (project) {
 							const projectColor = await this.plugin.getProjectColor(project);
-							const projectSpan = entryProjectCell.createSpan({ text: project });
-							if (projectColor) {
-								projectSpan.style.color = projectColor;
+							const projectFile = this.app.metadataCache.getFirstLinkpathDest(project, '');
+							
+							if (projectFile && projectFile instanceof TFile) {
+								const link = entryProjectCell.createEl('a', { 
+									text: project, 
+									cls: 'internal-link',
+									href: projectFile.path
+								});
+								if (projectColor) {
+									link.style.color = projectColor;
+								}
+								link.onclick = (e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									this.app.workspace.openLinkText(projectFile.path, '', false);
+								};
+							} else {
+								const projectSpan = entryProjectCell.createSpan({ text: project });
+								if (projectColor) {
+									projectSpan.style.color = projectColor;
+								}
 							}
 						} else {
 							entryProjectCell.setText('-');
@@ -5415,7 +5556,19 @@ class LapseReportsView extends ItemView {
 							: entry.duration + (Date.now() - entry.startTime!);
 						
 						entryRow.createEl('td', { text: this.plugin.formatTimeAsHHMMSS(entryDuration) });
-						entryRow.createEl('td', { text: noteName, cls: 'lapse-reports-note-name' });
+						
+						// Note name as clickable link
+						const noteNameCell = entryRow.createEl('td', { cls: 'lapse-reports-note-name' });
+						const noteLink = noteNameCell.createEl('a', { 
+							text: noteName, 
+							cls: 'internal-link',
+							href: filePath
+						});
+						noteLink.onclick = (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							this.app.workspace.openLinkText(filePath, '', false);
+						};
 					}
 				}
 			}
