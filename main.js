@@ -33,7 +33,7 @@ var DEFAULT_SETTINGS = {
   showSeconds: true,
   startTimeKey: "startTime",
   endTimeKey: "endTime",
-  entriesKey: "lapseEntries",
+  entriesKey: "timeEntries",
   totalTimeKey: "totalTimeTracked",
   projectKey: "project",
   defaultLabelType: "freeText",
@@ -56,8 +56,10 @@ var DEFAULT_SETTINGS = {
   // Don't show duration on note buttons by default
   noteButtonDurationType: "note",
   // Default to note
-  noteButtonTimePeriod: "today"
+  noteButtonTimePeriod: "today",
   // Default to today
+  calendarDefaultTemplate: ""
+  // No default template - user will be prompted
 };
 var LapsePlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -133,6 +135,10 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       "lapse-grid",
       (leaf) => new LapseGridView(leaf, this)
     );
+    this.registerView(
+      "lapse-calendar",
+      (leaf) => new LapseCalendarView(leaf, this)
+    );
     this.addRibbonIcon("clock", "Lapse: Show Activity", () => {
       this.activateView();
     });
@@ -141,6 +147,9 @@ var LapsePlugin = class extends import_obsidian.Plugin {
     });
     this.addRibbonIcon("play-circle", "Lapse: Show Quick Start", () => {
       this.activateButtonsView();
+    });
+    this.addRibbonIcon("calendar", "Lapse: Show Calendar", () => {
+      this.activateCalendarView();
     });
     this.addRibbonIcon("table", "Lapse: Show Entry Grid", () => {
       this.activateGridView();
@@ -294,6 +303,13 @@ var LapsePlugin = class extends import_obsidian.Plugin {
       name: "Show quick start",
       callback: () => {
         this.activateButtonsView();
+      }
+    });
+    this.addCommand({
+      id: "show-lapse-calendar",
+      name: "Show calendar",
+      callback: () => {
+        this.activateCalendarView();
       }
     });
     this.addCommand({
@@ -2441,6 +2457,15 @@ ${content}`;
     const seconds = pad(date.getSeconds());
     return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
   }
+  formatDateForFileName(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    const seconds = String(date.getSeconds()).padStart(2, "0");
+    return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+  }
   parseDatetimeLocal(value) {
     if (!value) {
       return null;
@@ -2601,6 +2626,20 @@ ${content}`;
     } else {
       leaf = workspace.getRightLeaf(false);
       await (leaf == null ? void 0 : leaf.setViewState({ type: "lapse-buttons", active: true }));
+    }
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
+  async activateCalendarView() {
+    const { workspace } = this.app;
+    let leaf = null;
+    const leaves = workspace.getLeavesOfType("lapse-calendar");
+    if (leaves.length > 0) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      await (leaf == null ? void 0 : leaf.setViewState({ type: "lapse-calendar", active: true }));
     }
     if (leaf) {
       workspace.revealLeaf(leaf);
@@ -3719,6 +3758,10 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.lapseButtonTemplatesFolder = value;
       await this.plugin.saveSettings();
     }));
+    new import_obsidian.Setting(containerEl).setName("Default template for calendar-created notes").setDesc("Template file path to use when creating new notes from the calendar (leave empty to use default format)").addText((text) => text.setPlaceholder("Templates/Lapse Buttons/Default").setValue(this.plugin.settings.calendarDefaultTemplate).onChange(async (value) => {
+      this.plugin.settings.calendarDefaultTemplate = value;
+      await this.plugin.saveSettings();
+    }));
     containerEl.createDiv({ cls: "setting-item-description" }).createEl("p", {
       text: "Create buttons in notes using inline code: `lapse:TemplateName`. The button will create a new note from the template and open it."
     });
@@ -4299,6 +4342,667 @@ var LapseReportsView = class extends import_obsidian.ItemView {
       labelDiv.textContent = item.group;
       foreignObject.appendChild(labelDiv);
       svg.appendChild(foreignObject);
+    });
+  }
+};
+var LapseCalendarView = class extends import_obsidian.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.viewType = "week";
+    this.currentDate = new Date();
+    this.refreshInterval = null;
+    // Drag state
+    this.dragState = {
+      type: null,
+      entryBlock: null,
+      entryData: null,
+      startY: 0,
+      startTime: 0,
+      dayColumn: null,
+      previewBlock: null
+    };
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return "lapse-calendar";
+  }
+  getDisplayText() {
+    return "Time Calendar";
+  }
+  getIcon() {
+    return "calendar";
+  }
+  async onOpen() {
+    await this.render();
+    this.refreshInterval = window.setInterval(() => {
+      this.updateActiveTimers();
+    }, 6e4);
+  }
+  async onClose() {
+    if (this.refreshInterval) {
+      window.clearInterval(this.refreshInterval);
+      this.refreshInterval = null;
+    }
+  }
+  async render() {
+    const container = this.containerEl.children[1];
+    container.empty();
+    container.addClass("lapse-calendar-view");
+    const header = container.createDiv({ cls: "lapse-calendar-header" });
+    const navSection = header.createDiv({ cls: "lapse-calendar-nav" });
+    const prevBtn = navSection.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Previous" } });
+    (0, import_obsidian.setIcon)(prevBtn, "chevron-left");
+    prevBtn.onclick = () => {
+      this.navigateDate(-1);
+    };
+    const todayBtn = navSection.createEl("button", { text: "Today", cls: "lapse-calendar-today-btn" });
+    todayBtn.onclick = () => {
+      this.currentDate = new Date();
+      this.render();
+    };
+    const nextBtn = navSection.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Next" } });
+    (0, import_obsidian.setIcon)(nextBtn, "chevron-right");
+    nextBtn.onclick = () => {
+      this.navigateDate(1);
+    };
+    const dateDisplay = header.createDiv({ cls: "lapse-calendar-date-display" });
+    this.updateDateDisplay(dateDisplay);
+    const controlsSection = header.createDiv({ cls: "lapse-calendar-controls" });
+    const viewTypeSelect = controlsSection.createEl("select", { cls: "lapse-calendar-view-select" });
+    viewTypeSelect.createEl("option", { text: "Day", value: "day" });
+    viewTypeSelect.createEl("option", { text: "3 Days", value: "3day" });
+    viewTypeSelect.createEl("option", { text: "Week", value: "week" });
+    viewTypeSelect.createEl("option", { text: "Month", value: "month" });
+    viewTypeSelect.value = this.viewType;
+    viewTypeSelect.onchange = () => {
+      this.viewType = viewTypeSelect.value;
+      this.render();
+    };
+    const refreshBtn = controlsSection.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Refresh" } });
+    (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
+    refreshBtn.onclick = async () => {
+      this.plugin.timeData.clear();
+      await this.render();
+    };
+    await this.renderCalendarGrid(container);
+  }
+  updateDateDisplay(container) {
+    container.empty();
+    const startDate = this.getViewStartDate();
+    const endDate = this.getViewEndDate();
+    if (this.viewType === "day") {
+      container.textContent = startDate.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    } else if (this.viewType === "3day") {
+      container.textContent = `${startDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+    } else if (this.viewType === "week") {
+      container.textContent = `${startDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+    } else {
+      container.textContent = startDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    }
+  }
+  getViewStartDate() {
+    const date = new Date(this.currentDate);
+    if (this.viewType === "week") {
+      const firstDay = this.plugin.settings.firstDayOfWeek;
+      const day = date.getDay();
+      const diff = day < firstDay ? day - firstDay + 7 : day - firstDay;
+      date.setDate(date.getDate() - diff);
+    } else if (this.viewType === "month") {
+      date.setDate(1);
+    }
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+  getViewEndDate() {
+    const startDate = this.getViewStartDate();
+    const endDate = new Date(startDate);
+    if (this.viewType === "day") {
+    } else if (this.viewType === "3day") {
+      endDate.setDate(endDate.getDate() + 2);
+    } else if (this.viewType === "week") {
+      endDate.setDate(endDate.getDate() + 6);
+    } else if (this.viewType === "month") {
+      endDate.setMonth(endDate.getMonth() + 1);
+      endDate.setDate(0);
+    }
+    endDate.setHours(23, 59, 59, 999);
+    return endDate;
+  }
+  navigateDate(direction) {
+    if (this.viewType === "day") {
+      this.currentDate.setDate(this.currentDate.getDate() + direction);
+    } else if (this.viewType === "3day") {
+      this.currentDate.setDate(this.currentDate.getDate() + direction * 3);
+    } else if (this.viewType === "week") {
+      this.currentDate.setDate(this.currentDate.getDate() + direction * 7);
+    } else if (this.viewType === "month") {
+      this.currentDate.setMonth(this.currentDate.getMonth() + direction);
+    }
+    this.render();
+  }
+  async renderCalendarGrid(container) {
+    const gridContainer = container.createDiv({ cls: "lapse-calendar-grid-container" });
+    const startDate = this.getViewStartDate();
+    const endDate = this.getViewEndDate();
+    const entries = await this.getAllEntriesInRange(startDate, endDate);
+    if (this.viewType === "month") {
+      await this.renderMonthView(gridContainer, entries, startDate);
+    } else {
+      await this.renderTimeSlotView(gridContainer, entries, startDate, endDate);
+    }
+  }
+  async getAllEntriesInRange(startDate, endDate) {
+    const allEntries = [];
+    const markdownFiles = this.plugin.app.vault.getMarkdownFiles();
+    const startTime = startDate.getTime();
+    const endTime = endDate.getTime();
+    for (const file of markdownFiles) {
+      if (this.plugin.isFileExcluded(file.path)) {
+        continue;
+      }
+      const { entries, project } = await this.plugin.getCachedOrLoadEntries(file.path);
+      let noteName = file.basename;
+      if (this.plugin.settings.hideTimestampsInViews) {
+        noteName = this.plugin.removeTimestampFromFileName(noteName);
+      }
+      for (const entry of entries) {
+        if (entry.startTime) {
+          const entryStart = entry.startTime;
+          const entryEnd = entry.endTime || Date.now();
+          if (entryStart <= endTime && entryEnd >= startTime) {
+            allEntries.push({
+              file,
+              entry,
+              project,
+              noteName
+            });
+          }
+        }
+      }
+    }
+    return allEntries;
+  }
+  async renderTimeSlotView(container, entries, startDate, endDate) {
+    const grid = container.createDiv({ cls: "lapse-calendar-grid" });
+    const timeColumn = grid.createDiv({ cls: "lapse-calendar-time-column" });
+    timeColumn.createDiv({ cls: "lapse-calendar-time-header" });
+    const timeSlots = [];
+    for (let hour = 0; hour < 24; hour++) {
+      for (let minute = 0; minute < 60; minute += 30) {
+        const timeStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+        timeSlots.push(timeStr);
+      }
+    }
+    for (const timeSlot of timeSlots) {
+      const slot = timeColumn.createDiv({ cls: "lapse-calendar-time-slot" });
+      slot.textContent = timeSlot;
+    }
+    const days = [];
+    const currentDay = new Date(startDate);
+    while (currentDay <= endDate) {
+      days.push(new Date(currentDay));
+      currentDay.setDate(currentDay.getDate() + 1);
+    }
+    const daysContainer = grid.createDiv({ cls: "lapse-calendar-days-container" });
+    const dayHeaders = daysContainer.createDiv({ cls: "lapse-calendar-day-headers" });
+    for (const day of days) {
+      const header = dayHeaders.createDiv({ cls: "lapse-calendar-day-header" });
+      header.createDiv({
+        text: day.toLocaleDateString("en-US", { weekday: "short" }),
+        cls: "lapse-calendar-day-weekday"
+      });
+      header.createDiv({
+        text: String(day.getDate()),
+        cls: "lapse-calendar-day-number"
+      });
+    }
+    const dayColumns = daysContainer.createDiv({ cls: "lapse-calendar-day-columns" });
+    for (const day of days) {
+      const dayColumn = dayColumns.createDiv({ cls: "lapse-calendar-day-column" });
+      dayColumn.dataset.day = day.toISOString();
+      const dayStart = new Date(day);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(day);
+      dayEnd.setHours(23, 59, 59, 999);
+      for (const timeSlot of timeSlots) {
+        const slot = dayColumn.createDiv({ cls: "lapse-calendar-day-slot" });
+        slot.dataset.time = timeSlot;
+      }
+      const dayEntries = entries.filter((item) => {
+        if (!item.entry.startTime)
+          return false;
+        const entryDate = new Date(item.entry.startTime);
+        return entryDate >= dayStart && entryDate <= dayEnd;
+      });
+      for (const item of dayEntries) {
+        await this.renderEntryBlock(dayColumn, item, dayStart);
+      }
+      this.setupDayColumnDragDrop(dayColumn, dayStart);
+      this.setupDayColumnCreate(dayColumn, dayStart);
+    }
+  }
+  async renderEntryBlock(dayColumn, item, dayStart) {
+    if (!item.entry.startTime)
+      return;
+    const entryStart = new Date(item.entry.startTime);
+    const entryEnd = item.entry.endTime ? new Date(item.entry.endTime) : new Date();
+    const slotHeight = 60;
+    const minutesPerSlot = 30;
+    const startMinutes = entryStart.getHours() * 60 + entryStart.getMinutes();
+    const endMinutes = entryEnd.getHours() * 60 + entryEnd.getMinutes();
+    const durationMinutes = endMinutes - startMinutes;
+    const top = startMinutes / minutesPerSlot * slotHeight;
+    const height = Math.max(durationMinutes / minutesPerSlot * slotHeight, 20);
+    const block = dayColumn.createDiv({ cls: "lapse-calendar-entry-block" });
+    block.style.top = `${top}px`;
+    block.style.height = `${height}px`;
+    block.draggable = true;
+    block.dataset.entryId = item.entry.id;
+    block.dataset.filePath = item.file.path;
+    if (item.project) {
+      const projectColor = await this.plugin.getProjectColor(item.project);
+      if (projectColor) {
+        block.style.borderLeftColor = projectColor;
+        block.style.borderLeftWidth = "3px";
+        block.style.borderLeftStyle = "solid";
+      }
+    }
+    const resizeStartHandle = block.createDiv({ cls: "lapse-calendar-resize-handle lapse-calendar-resize-start" });
+    resizeStartHandle.title = "Drag to change start time";
+    const resizeEndHandle = block.createDiv({ cls: "lapse-calendar-resize-handle lapse-calendar-resize-end" });
+    resizeEndHandle.title = "Drag to change end time";
+    const label = block.createDiv({ cls: "lapse-calendar-entry-label" });
+    label.textContent = item.entry.label || "Untitled";
+    label.title = `${item.noteName}${item.project ? ` - ${item.project}` : ""}`;
+    const time = block.createDiv({ cls: "lapse-calendar-entry-time" });
+    const startTimeStr = entryStart.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    const endTimeStr = entryEnd.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    time.textContent = `${startTimeStr} - ${endTimeStr}`;
+    let isDragging = false;
+    block.onmousedown = (e) => {
+      if (e.target === resizeStartHandle || e.target === resizeEndHandle) {
+        return;
+      }
+      isDragging = false;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const onMouseMove = (moveEvent) => {
+        const deltaX = Math.abs(moveEvent.clientX - startX);
+        const deltaY = Math.abs(moveEvent.clientY - startY);
+        if (deltaX > 5 || deltaY > 5) {
+          isDragging = true;
+        }
+      };
+      const onMouseUp = async (upEvent) => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        if (!isDragging) {
+          await this.openNoteModal(item.file, item.entry);
+        }
+      };
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    };
+    block.ondragstart = (e) => {
+      if (e.target === resizeStartHandle || e.target === resizeEndHandle) {
+        e.preventDefault();
+        return;
+      }
+      this.dragState.type = "move";
+      this.dragState.entryBlock = block;
+      this.dragState.entryData = { file: item.file, entry: item.entry };
+      this.dragState.startTime = item.entry.startTime;
+      e.dataTransfer.effectAllowed = "move";
+      block.addClass("lapse-calendar-entry-dragging");
+    };
+    block.ondragend = () => {
+      block.removeClass("lapse-calendar-entry-dragging");
+      this.dragState.type = null;
+      this.dragState.entryBlock = null;
+      this.dragState.entryData = null;
+    };
+    this.setupResizeHandle(resizeStartHandle, block, item, dayStart, "start");
+    this.setupResizeHandle(resizeEndHandle, block, item, dayStart, "end");
+    if (!item.entry.endTime) {
+      block.addClass("lapse-calendar-entry-active");
+      const activeIndicator = block.createDiv({ cls: "lapse-calendar-entry-active-indicator" });
+      activeIndicator.textContent = "\u25CF";
+    }
+  }
+  async renderMonthView(container, entries, startDate) {
+    const monthGrid = container.createDiv({ cls: "lapse-calendar-month-grid" });
+    const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const weekdayHeader = monthGrid.createDiv({ cls: "lapse-calendar-month-weekdays" });
+    for (const day of weekdays) {
+      weekdayHeader.createDiv({ text: day, cls: "lapse-calendar-month-weekday" });
+    }
+    const firstDay = new Date(startDate);
+    const lastDay = new Date(startDate);
+    lastDay.setMonth(lastDay.getMonth() + 1);
+    lastDay.setDate(0);
+    const daysGrid = monthGrid.createDiv({ cls: "lapse-calendar-month-days" });
+    const firstDayOfWeek = firstDay.getDay();
+    for (let i = 0; i < firstDayOfWeek; i++) {
+      daysGrid.createDiv({ cls: "lapse-calendar-month-day empty" });
+    }
+    const currentDay = new Date(firstDay);
+    while (currentDay <= lastDay) {
+      const dayCell = daysGrid.createDiv({ cls: "lapse-calendar-month-day" });
+      dayCell.createDiv({
+        text: String(currentDay.getDate()),
+        cls: "lapse-calendar-month-day-number"
+      });
+      const dayStart = new Date(currentDay);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(currentDay);
+      dayEnd.setHours(23, 59, 59, 999);
+      const dayEntries = entries.filter((item) => {
+        if (!item.entry.startTime)
+          return false;
+        const entryDate = new Date(item.entry.startTime);
+        return entryDate >= dayStart && entryDate <= dayEnd;
+      });
+      if (dayEntries.length > 0) {
+        const totalTime = dayEntries.reduce((sum, item) => {
+          if (item.entry.startTime && item.entry.endTime) {
+            return sum + item.entry.duration;
+          } else if (item.entry.startTime) {
+            return sum + (Date.now() - item.entry.startTime);
+          }
+          return sum;
+        }, 0);
+        const timeDisplay = dayCell.createDiv({ cls: "lapse-calendar-month-day-time" });
+        timeDisplay.textContent = this.plugin.formatTimeForButton(totalTime);
+        const countDisplay = dayCell.createDiv({ cls: "lapse-calendar-month-day-count" });
+        countDisplay.textContent = `${dayEntries.length} entry${dayEntries.length !== 1 ? "ies" : "y"}`;
+        dayCell.addClass("has-entries");
+        dayCell.onclick = () => {
+          this.currentDate = new Date(currentDay);
+          this.viewType = "day";
+          this.render();
+        };
+      }
+      currentDay.setDate(currentDay.getDate() + 1);
+    }
+  }
+  async openNoteModal(file, entry) {
+    await this.plugin.app.workspace.openLinkText(file.path, "", false);
+  }
+  setupResizeHandle(handle, block, item, dayStart, type) {
+    handle.onmousedown = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const slotHeight = 60;
+      const minutesPerSlot = 30;
+      const entryStart = new Date(item.entry.startTime);
+      const entryEnd = item.entry.endTime ? new Date(item.entry.endTime) : new Date();
+      this.dragState.type = type === "start" ? "resize-start" : "resize-end";
+      this.dragState.entryBlock = block;
+      this.dragState.entryData = { file: item.file, entry: item.entry };
+      this.dragState.startY = e.clientY;
+      this.dragState.startTime = type === "start" ? entryStart.getTime() : entryEnd.getTime();
+      this.dragState.dayColumn = block.parentElement;
+      const dayColumnRect = this.dragState.dayColumn.getBoundingClientRect();
+      const initialY = e.clientY - dayColumnRect.top;
+      const onMouseMove = (moveEvent) => {
+        const currentY = moveEvent.clientY - dayColumnRect.top;
+        const deltaY = currentY - initialY;
+        const deltaMinutes = deltaY / slotHeight * minutesPerSlot;
+        let newTime = this.dragState.startTime + deltaMinutes * 60 * 1e3;
+        newTime = this.snapTo5Minutes(newTime);
+        if (type === "start") {
+          const newStart = new Date(newTime);
+          const currentEnd = item.entry.endTime ? new Date(item.entry.endTime) : new Date();
+          const newDuration = currentEnd.getTime() - newStart.getTime();
+          if (newDuration > 0) {
+            const startMinutes = newStart.getHours() * 60 + newStart.getMinutes();
+            const top = startMinutes / minutesPerSlot * slotHeight;
+            const height = newDuration / (60 * 1e3) / minutesPerSlot * slotHeight;
+            block.style.top = `${top}px`;
+            block.style.height = `${height}px`;
+          }
+        } else {
+          const currentStart = new Date(item.entry.startTime);
+          const newEnd = new Date(newTime);
+          const newDuration = newEnd.getTime() - currentStart.getTime();
+          if (newDuration > 0) {
+            const height = newDuration / (60 * 1e3) / minutesPerSlot * slotHeight;
+            block.style.height = `${height}px`;
+          }
+        }
+      };
+      const onMouseUp = async (upEvent) => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        const currentY = upEvent.clientY - dayColumnRect.top;
+        const deltaY = currentY - initialY;
+        const deltaMinutes = deltaY / slotHeight * minutesPerSlot;
+        let newTime = this.dragState.startTime + deltaMinutes * 60 * 1e3;
+        newTime = this.snapTo5Minutes(newTime);
+        if (type === "start") {
+          await this.updateEntryTime(item.file, item.entry, "start", newTime);
+          await this.updateEntryBlockDisplay(block, item, dayStart);
+        } else {
+          await this.updateEntryTime(item.file, item.entry, "end", newTime);
+          await this.updateEntryBlockDisplay(block, item, dayStart);
+        }
+      };
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    };
+  }
+  snapTo5Minutes(timestamp) {
+    const date = new Date(timestamp);
+    const minutes = date.getMinutes();
+    const snappedMinutes = Math.round(minutes / 5) * 5;
+    date.setMinutes(snappedMinutes, 0, 0);
+    return date.getTime();
+  }
+  async updateEntryTime(file, entry, type, newTime) {
+    const { entries } = await this.plugin.getCachedOrLoadEntries(file.path);
+    const entryIndex = entries.findIndex((e) => e.id === entry.id);
+    if (entryIndex === -1)
+      return;
+    if (type === "start") {
+      entries[entryIndex].startTime = newTime;
+      const endTime = entries[entryIndex].endTime;
+      if (endTime !== null && endTime !== void 0) {
+        entries[entryIndex].duration = endTime - newTime;
+      }
+    } else {
+      entries[entryIndex].endTime = newTime;
+      const startTime = entries[entryIndex].startTime;
+      if (startTime !== null && startTime !== void 0) {
+        entries[entryIndex].duration = newTime - startTime;
+      }
+    }
+    entry.startTime = entries[entryIndex].startTime;
+    entry.endTime = entries[entryIndex].endTime;
+    entry.duration = entries[entryIndex].duration;
+    await this.plugin.updateFrontmatter(file.path);
+  }
+  async updateEntryBlockDisplay(block, item, dayStart) {
+    if (!item.entry.startTime)
+      return;
+    const entryStart = new Date(item.entry.startTime);
+    const entryEnd = item.entry.endTime ? new Date(item.entry.endTime) : new Date();
+    const slotHeight = 60;
+    const minutesPerSlot = 30;
+    const startMinutes = entryStart.getHours() * 60 + entryStart.getMinutes();
+    const endMinutes = entryEnd.getHours() * 60 + entryEnd.getMinutes();
+    const durationMinutes = endMinutes - startMinutes;
+    const top = startMinutes / minutesPerSlot * slotHeight;
+    const height = Math.max(durationMinutes / minutesPerSlot * slotHeight, 20);
+    block.style.top = `${top}px`;
+    block.style.height = `${height}px`;
+    const timeEl = block.querySelector(".lapse-calendar-entry-time");
+    if (timeEl) {
+      const startTimeStr = entryStart.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      const endTimeStr = entryEnd.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      timeEl.textContent = `${startTimeStr} - ${endTimeStr}`;
+    }
+  }
+  setupDayColumnDragDrop(dayColumn, dayStart) {
+    dayColumn.ondragover = (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      dayColumn.addClass("lapse-calendar-day-column-drag-over");
+    };
+    dayColumn.ondragleave = () => {
+      dayColumn.removeClass("lapse-calendar-day-column-drag-over");
+    };
+    dayColumn.ondrop = async (e) => {
+      e.preventDefault();
+      dayColumn.removeClass("lapse-calendar-day-column-drag-over");
+      if (this.dragState.type === "move" && this.dragState.entryData) {
+        const dayColumnRect = dayColumn.getBoundingClientRect();
+        const dropY = e.clientY - dayColumnRect.top;
+        const slotHeight = 60;
+        const minutesPerSlot = 30;
+        const dropMinutes = dropY / slotHeight * minutesPerSlot;
+        const dropHours = Math.floor(dropMinutes / 60);
+        const dropMins = Math.floor(dropMinutes % 60);
+        const newStartTime = new Date(dayStart);
+        newStartTime.setHours(dropHours, dropMins, 0, 0);
+        const snappedTime = this.snapTo5Minutes(newStartTime.getTime());
+        const originalStart = new Date(this.dragState.startTime);
+        const timeDiff = snappedTime - originalStart.getTime();
+        const entry = this.dragState.entryData.entry;
+        if (entry.startTime) {
+          const newStart = entry.startTime + timeDiff;
+          await this.updateEntryTime(this.dragState.entryData.file, entry, "start", newStart);
+          if (entry.endTime) {
+            const newEnd = entry.endTime + timeDiff;
+            await this.updateEntryTime(this.dragState.entryData.file, entry, "end", newEnd);
+          }
+          const newEntryDate = new Date(newStart);
+          const dropDay = new Date(dayColumn.dataset.day);
+          const sameDay = newEntryDate.getDate() === dropDay.getDate() && newEntryDate.getMonth() === dropDay.getMonth() && newEntryDate.getFullYear() === dropDay.getFullYear();
+          if (sameDay && this.dragState.entryBlock) {
+            const dayStart2 = new Date(dropDay);
+            dayStart2.setHours(0, 0, 0, 0);
+            await this.updateEntryBlockDisplay(this.dragState.entryBlock, {
+              file: this.dragState.entryData.file,
+              entry,
+              project: null,
+              noteName: ""
+            }, dayStart2);
+          } else {
+            await this.render();
+          }
+        }
+      }
+    };
+  }
+  setupDayColumnCreate(dayColumn, dayStart) {
+    let isCreating = false;
+    let createStartY = 0;
+    let previewBlock = null;
+    dayColumn.onmousedown = (e) => {
+      if (e.target.closest(".lapse-calendar-entry-block")) {
+        return;
+      }
+      const slotHeight = 60;
+      const minutesPerSlot = 30;
+      const dayColumnRect = dayColumn.getBoundingClientRect();
+      const startY = e.clientY - dayColumnRect.top;
+      const startMinutes = startY / slotHeight * minutesPerSlot;
+      const startHours = Math.floor(startMinutes / 60);
+      const startMins = Math.floor(startMinutes % 60);
+      const startTime = new Date(dayStart);
+      startTime.setHours(startHours, startMins, 0, 0);
+      const snappedStart = this.snapTo5Minutes(startTime.getTime());
+      isCreating = true;
+      createStartY = startY;
+      previewBlock = dayColumn.createDiv({ cls: "lapse-calendar-entry-block lapse-calendar-entry-preview" });
+      previewBlock.style.top = `${startY}px`;
+      previewBlock.style.height = "20px";
+      previewBlock.createDiv({ cls: "lapse-calendar-entry-label", text: "New entry..." });
+      const onMouseMove = (moveEvent) => {
+        if (!isCreating || !previewBlock)
+          return;
+        const currentY = moveEvent.clientY - dayColumnRect.top;
+        const height = Math.max(currentY - createStartY, 20);
+        previewBlock.style.height = `${height}px`;
+      };
+      const onMouseUp = async (upEvent) => {
+        if (!isCreating || !previewBlock)
+          return;
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        const dayColumnRect2 = dayColumn.getBoundingClientRect();
+        const endY = upEvent.clientY - dayColumnRect2.top;
+        const endMinutes = endY / slotHeight * minutesPerSlot;
+        const endHours = Math.floor(endMinutes / 60);
+        const endMins = Math.floor(endMinutes % 60);
+        const endTime = new Date(dayStart);
+        endTime.setHours(endHours, endMins, 0, 0);
+        const snappedEnd = this.snapTo5Minutes(endTime.getTime());
+        if (snappedEnd > snappedStart) {
+          await this.createNewEntryFromCalendar(snappedStart, snappedEnd);
+        }
+        if (previewBlock) {
+          previewBlock.remove();
+          previewBlock = null;
+        }
+        isCreating = false;
+      };
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    };
+  }
+  async createNewEntryFromCalendar(startTime, endTime) {
+    const label = prompt("Enter label for new time entry:");
+    if (!label)
+      return;
+    let templatePath = null;
+    if (this.plugin.settings.calendarDefaultTemplate) {
+      const templateFile = this.plugin.app.vault.getAbstractFileByPath(this.plugin.settings.calendarDefaultTemplate);
+      if (templateFile instanceof import_obsidian.TFile) {
+        templatePath = templateFile.path;
+      }
+    }
+    let file;
+    if (templatePath) {
+      const templateFile = this.plugin.app.vault.getAbstractFileByPath(templatePath);
+      if (!templateFile || !(templateFile instanceof import_obsidian.TFile)) {
+        throw new Error(`Template file not found: ${templatePath}`);
+      }
+      const templateContent = await this.plugin.app.vault.read(templateFile);
+      const newFileName = `${this.plugin.formatDateForFileName(new Date(startTime))}-${label.replace(/[^a-zA-Z0-9]/g, "-")}.md`;
+      const newFilePath = templatePath.split("/").slice(0, -1).join("/") + "/" + newFileName;
+      file = await this.plugin.app.vault.create(newFilePath, templateContent);
+    } else {
+      const newFileName = `${this.plugin.formatDateForFileName(new Date(startTime))}-${label.replace(/[^a-zA-Z0-9]/g, "-")}.md`;
+      const defaultFolder = this.plugin.settings.lapseButtonTemplatesFolder.split("/")[0] || "";
+      const newFilePath = defaultFolder ? `${defaultFolder}/${newFileName}` : newFileName;
+      file = await this.plugin.app.vault.create(newFilePath, `---
+${this.plugin.settings.projectKey}: 
+${this.plugin.settings.entriesKey}: []
+---
+
+# ${label}
+`);
+    }
+    const duration = endTime - startTime;
+    const entry = {
+      id: `entry-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      label,
+      startTime,
+      endTime,
+      duration,
+      isPaused: false,
+      tags: []
+    };
+    const { entries } = await this.plugin.getCachedOrLoadEntries(file.path);
+    entries.push(entry);
+    await this.plugin.updateFrontmatter(file.path);
+    await this.render();
+  }
+  updateActiveTimers() {
+    const container = this.containerEl.children[1];
+    const activeBlocks = container.querySelectorAll(".lapse-calendar-entry-active");
+    activeBlocks.forEach((block) => {
     });
   }
 };

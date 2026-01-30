@@ -1556,3 +1556,354 @@
     font-style: italic;
     color: var(--text-muted);
 }
+
+/* Calendar View Styles */
+
+.lapse-calendar-view {
+    padding: 16px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.lapse-calendar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.lapse-calendar-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.lapse-calendar-today-btn {
+    padding: 6px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.lapse-calendar-today-btn:hover {
+    background: var(--background-modifier-hover);
+}
+
+.lapse-calendar-date-display {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-normal);
+    flex: 1;
+    text-align: center;
+}
+
+.lapse-calendar-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.lapse-calendar-view-select {
+    padding: 6px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.lapse-calendar-grid-container {
+    flex: 1;
+    overflow: auto;
+}
+
+.lapse-calendar-grid {
+    display: flex;
+    min-height: 100%;
+}
+
+.lapse-calendar-time-column {
+    width: 80px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--background-modifier-border);
+}
+
+.lapse-calendar-time-header {
+    height: 60px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.lapse-calendar-time-slot {
+    height: 60px;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--background-modifier-border);
+    display: flex;
+    align-items: flex-start;
+    font-variant-numeric: tabular-nums;
+}
+
+.lapse-calendar-days-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.lapse-calendar-day-headers {
+    display: flex;
+    border-bottom: 2px solid var(--background-modifier-border);
+    height: 60px;
+}
+
+.lapse-calendar-day-header {
+    flex: 1;
+    padding: 8px;
+    text-align: center;
+    border-right: 1px solid var(--background-modifier-border);
+}
+
+.lapse-calendar-day-header:last-child {
+    border-right: none;
+}
+
+.lapse-calendar-day-weekday {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+
+.lapse-calendar-day-number {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.lapse-calendar-day-columns {
+    display: flex;
+    flex: 1;
+    position: relative;
+}
+
+.lapse-calendar-day-column {
+    flex: 1;
+    border-right: 1px solid var(--background-modifier-border);
+    position: relative;
+}
+
+.lapse-calendar-day-column:last-child {
+    border-right: none;
+}
+
+.lapse-calendar-day-slot {
+    height: 60px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    position: relative;
+}
+
+.lapse-calendar-entry-block {
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 4px 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    overflow: hidden;
+    z-index: 1;
+    min-height: 20px;
+}
+
+.lapse-calendar-entry-block:hover {
+    background: var(--background-modifier-hover);
+    border-color: var(--interactive-accent);
+    z-index: 2;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.lapse-calendar-entry-block.lapse-calendar-entry-active {
+    border-left-width: 3px;
+    animation: lapse-pulse 2s ease-in-out infinite;
+}
+
+@keyframes lapse-pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.8;
+    }
+}
+
+.lapse-calendar-entry-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-normal);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 2px;
+}
+
+.lapse-calendar-entry-time {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.lapse-calendar-entry-active-indicator {
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    font-size: 8px;
+    color: var(--interactive-accent);
+    animation: lapse-blink 1s ease-in-out infinite;
+}
+
+@keyframes lapse-blink {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.3;
+    }
+}
+
+/* Month View Styles */
+
+.lapse-calendar-month-grid {
+    display: flex;
+    flex-direction: column;
+}
+
+.lapse-calendar-month-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    border-bottom: 2px solid var(--background-modifier-border);
+    padding: 8px 0;
+}
+
+.lapse-calendar-month-weekday {
+    text-align: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.lapse-calendar-month-days {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 1px;
+    background: var(--background-modifier-border);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.lapse-calendar-month-day {
+    min-height: 100px;
+    padding: 8px;
+    background: var(--background-primary);
+    cursor: pointer;
+    transition: background-color 0.2s;
+    position: relative;
+}
+
+.lapse-calendar-month-day.empty {
+    background: var(--background-secondary);
+    cursor: default;
+}
+
+.lapse-calendar-month-day:hover:not(.empty) {
+    background: var(--background-modifier-hover);
+}
+
+.lapse-calendar-month-day.has-entries {
+    background: var(--background-secondary);
+}
+
+.lapse-calendar-month-day.has-entries:hover {
+    background: var(--background-modifier-hover);
+}
+
+.lapse-calendar-month-day-number {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin-bottom: 4px;
+}
+
+.lapse-calendar-month-day-time {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-accent);
+    font-variant-numeric: tabular-nums;
+    margin-top: 4px;
+}
+
+.lapse-calendar-month-day-count {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* Calendar Drag & Drop Styles */
+
+.lapse-calendar-resize-handle {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 6px;
+    cursor: ns-resize;
+    z-index: 10;
+    background: transparent;
+    transition: background-color 0.2s;
+}
+
+.lapse-calendar-resize-handle:hover {
+    background: var(--interactive-accent);
+    opacity: 0.5;
+}
+
+.lapse-calendar-resize-start {
+    top: -3px;
+    border-radius: 4px 4px 0 0;
+}
+
+.lapse-calendar-resize-end {
+    bottom: -3px;
+    border-radius: 0 0 4px 4px;
+}
+
+.lapse-calendar-entry-block {
+    user-select: none;
+}
+
+.lapse-calendar-entry-dragging {
+    opacity: 0.5;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.lapse-calendar-day-column-drag-over {
+    background: var(--background-modifier-hover);
+    border: 2px dashed var(--interactive-accent);
+}
+
+.lapse-calendar-entry-preview {
+    background: var(--background-modifier-hover);
+    border: 2px dashed var(--interactive-accent);
+    opacity: 0.7;
+    pointer-events: none;
+}
