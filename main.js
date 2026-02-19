@@ -36,6 +36,7 @@ var DEFAULT_SETTINGS = {
   entriesKey: "timeEntries",
   totalTimeKey: "totalTimeTracked",
   projectKey: "project",
+  quickStartGroupByKey: "project",
   defaultLabelType: "freeText",
   defaultLabelText: "",
   defaultLabelFrontmatterKey: "project",
@@ -2790,6 +2791,7 @@ ${content}`;
     return results;
   }
   async getTemplateDataList() {
+    var _a;
     const templateFolder = this.settings.lapseButtonTemplatesFolder;
     if (!templateFolder) {
       return [];
@@ -2798,9 +2800,11 @@ ${content}`;
     const files = this.app.vault.getMarkdownFiles();
     const templates = files.filter((file) => file.path.startsWith(normalizedFolder));
     const templateDataList = [];
+    const groupByKey = ((_a = this.settings.quickStartGroupByKey) == null ? void 0 : _a.trim()) || this.settings.projectKey;
     for (const template of templates) {
       let project = null;
       let projectColor = null;
+      let groupValue = null;
       try {
         const content = await this.app.vault.read(template);
         const frontmatterRegex = /---\n([\s\S]*?)\n---/;
@@ -2808,17 +2812,22 @@ ${content}`;
         if (match) {
           const frontmatter = match[1];
           const lines = frontmatter.split("\n");
-          for (const line of lines) {
-            if (line.trim().startsWith(`${this.settings.projectKey}:`)) {
-              project = line.split(":").slice(1).join(":").trim();
-              if (project) {
-                project = project.replace(/\[\[/g, "").replace(/\]\]/g, "");
-                project = project.replace(/^["']+|["']+$/g, "");
-                project = project.trim();
+          const parseKey = (key) => {
+            for (const line of lines) {
+              if (line.trim().startsWith(`${key}:`)) {
+                let val = line.split(":").slice(1).join(":").trim();
+                if (val) {
+                  val = val.replace(/\[\[/g, "").replace(/\]\]/g, "");
+                  val = val.replace(/^["']+|["']+$/g, "");
+                  val = val.trim();
+                }
+                return val || null;
               }
-              break;
             }
-          }
+            return null;
+          };
+          project = parseKey(this.settings.projectKey);
+          groupValue = groupByKey === this.settings.projectKey ? project : parseKey(groupByKey);
         }
         if (project) {
           projectColor = await this.getProjectColor(project);
@@ -2830,20 +2839,22 @@ ${content}`;
         template,
         templateName: template.basename,
         project,
-        projectColor
+        projectColor,
+        groupValue
       });
     }
     templateDataList.sort((a, b) => a.templateName.localeCompare(b.templateName));
     return templateDataList;
   }
   groupTemplateData(templateDataList) {
+    var _a;
     const grouped = /* @__PURE__ */ new Map();
     for (const data of templateDataList) {
-      const projectKey = data.project || "No Project";
-      if (!grouped.has(projectKey)) {
-        grouped.set(projectKey, []);
+      const groupKey = (_a = data.groupValue) != null ? _a : "No Project";
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, []);
       }
-      grouped.get(projectKey).push(data);
+      grouped.get(groupKey).push(data);
     }
     const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
       if (a === "No Project")
@@ -2912,16 +2923,17 @@ async function appendQuickStartButton(container, plugin, data, onNoteCreated) {
   };
 }
 async function renderTemplateGroups(container, plugin, groupResult, onNoteCreated) {
+  var _a;
   for (const projectKey of groupResult.sortedProjects) {
     const projectTemplates = groupResult.grouped.get(projectKey);
     const projectSection = container.createDiv({ cls: "lapse-buttons-project-section" });
     const projectHeader = projectSection.createDiv({ cls: "lapse-buttons-project-header" });
     const title = projectHeader.createEl("h3", { text: projectKey, cls: "lapse-buttons-project-title" });
     if (projectKey !== "No Project") {
-      const projectColor = projectTemplates[0].projectColor;
-      if (projectColor) {
-        projectHeader.style.borderLeftColor = projectColor;
-        title.style.color = projectColor;
+      const sectionColor = (_a = await plugin.getProjectColor(projectKey)) != null ? _a : projectTemplates[0].projectColor;
+      if (sectionColor) {
+        projectHeader.style.borderLeftColor = sectionColor;
+        title.style.color = sectionColor;
       }
     }
     const buttonsGrid = projectSection.createDiv({ cls: "lapse-buttons-grid" });
@@ -3655,6 +3667,10 @@ var LapseSettingTab = class extends import_obsidian.PluginSettingTab {
     }));
     new import_obsidian.Setting(containerEl).setName("Project Key").setDesc("Frontmatter key for project name").addText((text) => text.setPlaceholder("project").setValue(this.plugin.settings.projectKey).onChange(async (value) => {
       this.plugin.settings.projectKey = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Group Quick Start By\u2026").setDesc("Frontmatter key to group Quick Start panel by (e.g. project, parent, areaOfLife). Leave as project for default behavior.").addText((text) => text.setPlaceholder("project").setValue(this.plugin.settings.quickStartGroupByKey).onChange(async (value) => {
+      this.plugin.settings.quickStartGroupByKey = (value == null ? void 0 : value.trim()) || "project";
       await this.plugin.saveSettings();
     }));
     containerEl.createEl("h3", { text: "Default Time Entry Label" });

@@ -8,6 +8,7 @@ interface LapseSettings {
 	entriesKey: string;
 	totalTimeKey: string;
 	projectKey: string;
+	quickStartGroupByKey: string; // Frontmatter key to group Quick Start panel by (default: project)
 	defaultLabelType: 'freeText' | 'frontmatter' | 'fileName';
 	defaultLabelText: string;
 	defaultLabelFrontmatterKey: string;
@@ -34,6 +35,7 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	entriesKey: 'timeEntries',
 	totalTimeKey: 'totalTimeTracked',
 	projectKey: 'project',
+	quickStartGroupByKey: 'project',
 	defaultLabelType: 'freeText',
 	defaultLabelText: '',
 	defaultLabelFrontmatterKey: 'project',
@@ -95,6 +97,7 @@ interface TemplateData {
 	templateName: string;
 	project: string | null;
 	projectColor: string | null;
+	groupValue: string | null; // Value of quickStartGroupByKey frontmatter, used for Quick Start grouping
 }
 
 interface TemplateGroupResult {
@@ -3381,8 +3384,13 @@ export default class LapsePlugin extends Plugin {
 			return null;
 		}
 		const normalized = value.trim();
+		// If string has Z or timezone offset, parse as UTC so GMT-written timestamps are correct everywhere
+		if (/Z|[+-]\d{2}:?\d{2}$/.test(normalized)) {
+			const parsed = new Date(normalized).getTime();
+			return Number.isNaN(parsed) ? null : parsed;
+		}
 		const match = normalized.match(
-			/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/
+			/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/
 		);
 		if (!match) {
 			const fallback = new Date(normalized).getTime();
@@ -3820,9 +3828,12 @@ export default class LapsePlugin extends Plugin {
 
 		const templateDataList: TemplateData[] = [];
 
+		const groupByKey = this.settings.quickStartGroupByKey?.trim() || this.settings.projectKey;
+
 		for (const template of templates) {
 			let project: string | null = null;
 			let projectColor: string | null = null;
+			let groupValue: string | null = null;
 
 			try {
 				const content = await this.app.vault.read(template);
@@ -3833,17 +3844,23 @@ export default class LapsePlugin extends Plugin {
 					const frontmatter = match[1];
 					const lines = frontmatter.split('\n');
 
-					for (const line of lines) {
-						if (line.trim().startsWith(`${this.settings.projectKey}:`)) {
-							project = line.split(':').slice(1).join(':').trim();
-							if (project) {
-								project = project.replace(/\[\[/g, '').replace(/\]\]/g, '');
-								project = project.replace(/^["']+|["']+$/g, '');
-								project = project.trim();
+					const parseKey = (key: string): string | null => {
+						for (const line of lines) {
+							if (line.trim().startsWith(`${key}:`)) {
+								let val = line.split(':').slice(1).join(':').trim();
+								if (val) {
+									val = val.replace(/\[\[/g, '').replace(/\]\]/g, '');
+									val = val.replace(/^["']+|["']+$/g, '');
+									val = val.trim();
+								}
+								return val || null;
 							}
-							break;
 						}
-					}
+						return null;
+					};
+
+					project = parseKey(this.settings.projectKey);
+					groupValue = groupByKey === this.settings.projectKey ? project : parseKey(groupByKey);
 				}
 
 				if (project) {
@@ -3857,7 +3874,8 @@ export default class LapsePlugin extends Plugin {
 				template,
 				templateName: template.basename,
 				project,
-				projectColor
+				projectColor,
+				groupValue
 			});
 		}
 
@@ -3869,11 +3887,11 @@ export default class LapsePlugin extends Plugin {
 		const grouped = new Map<string, TemplateData[]>();
 
 		for (const data of templateDataList) {
-			const projectKey = data.project || 'No Project';
-			if (!grouped.has(projectKey)) {
-				grouped.set(projectKey, []);
+			const groupKey = data.groupValue ?? 'No Project';
+			if (!grouped.has(groupKey)) {
+				grouped.set(groupKey, []);
 			}
-			grouped.get(projectKey)!.push(data);
+			grouped.get(groupKey)!.push(data);
 		}
 
 		const sortedProjects = Array.from(grouped.keys()).sort((a, b) => {
@@ -3959,10 +3977,10 @@ async function renderTemplateGroups(container: HTMLElement, plugin: LapsePlugin,
 	const title = projectHeader.createEl('h3', { text: projectKey, cls: 'lapse-buttons-project-title' }) as HTMLElement;
 		
 		if (projectKey !== 'No Project') {
-			const projectColor = projectTemplates[0].projectColor;
-			if (projectColor) {
-				projectHeader.style.borderLeftColor = projectColor;
-				title.style.color = projectColor;
+			const sectionColor = await plugin.getProjectColor(projectKey) ?? projectTemplates[0].projectColor;
+			if (sectionColor) {
+				projectHeader.style.borderLeftColor = sectionColor;
+				title.style.color = sectionColor;
 			}
 		}
 		
@@ -4976,6 +4994,17 @@ class LapseSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.projectKey)
 				.onChange(async (value) => {
 					this.plugin.settings.projectKey = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Group Quick Start By…')
+			.setDesc('Frontmatter key to group Quick Start panel by (e.g. project, parent, areaOfLife). Leave as project for default behavior.')
+			.addText(text => text
+				.setPlaceholder('project')
+				.setValue(this.plugin.settings.quickStartGroupByKey)
+				.onChange(async (value) => {
+					this.plugin.settings.quickStartGroupByKey = (value?.trim()) || 'project';
 					await this.plugin.saveSettings();
 				}));
 
