@@ -393,7 +393,7 @@ views:
 2. **Test Data Extraction**:
    - Verify `basesView.data.data` contains the filtered files
    - Check if `basesView.data.groupedData` exists
-   - Ensure `basesView.config` is available for configuration
+   - Ensure `basesView.config` is available for configurationn
 
 3. **Implement Render Logic**:
    - Call `render()` method after constructor
