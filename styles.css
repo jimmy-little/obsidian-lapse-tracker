@@ -1272,6 +1272,146 @@
     vertical-align: top;
 }
 
+/* Quick Start / Timery-style cards */
+.lapse-button--timery {
+    --lapse-play-bg: var(--text-muted);
+    --lapse-play-fg: var(--background-primary);
+
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    height: auto;
+    min-height: 56px;
+    padding: 6px 10px 6px 8px;
+}
+
+.lapse-button--timery:focus-visible {
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: 2px;
+}
+
+.lapse-button--timery .lapse-button-body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    flex: 1;
+    width: auto;
+}
+
+.lapse-button-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    width: 100%;
+}
+
+.lapse-button-play {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
+    min-height: 26px;
+    border-radius: 50%;
+    border: none;
+    background-color: var(--lapse-play-bg);
+    color: var(--lapse-play-fg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    pointer-events: none;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.lapse-button-play svg {
+    width: 11px;
+    height: 11px;
+    stroke-width: 2.25px;
+}
+
+.lapse-button-title-block {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: baseline;
+    gap: 0;
+    overflow: hidden;
+}
+
+.lapse-button-project-name {
+    font-size: 12px;
+    font-weight: 600;
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.25;
+}
+
+.lapse-button-bullet {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.lapse-button-area {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.25;
+}
+
+.lapse-button-meta {
+    flex-shrink: 0;
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-muted);
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+}
+
+.lapse-button-meta-sep {
+    opacity: 0.65;
+    user-select: none;
+}
+
+.lapse-button-period {
+    display: inline;
+}
+
+.lapse-button-desc {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-normal);
+    line-height: 1.3;
+    padding-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+    width: 100%;
+    box-sizing: border-box;
+    opacity: 0.92;
+}
+
 .lapse-button:hover {
     background-color: var(--background-modifier-hover);
     transform: translateY(-1px);
@@ -1312,7 +1452,8 @@
     margin-left: auto;
 }
 
-.lapse-button-project {
+/* Inline lapse: buttons only — keep pill under title */
+.lapse-button:not(.lapse-button--timery) .lapse-button-project {
     font-size: 12px;
     font-weight: 500;
     margin-top: 8px;
@@ -1408,21 +1549,103 @@
     height: 16px;
 }
 
-.lapse-buttons-project-section {
-    margin-bottom: 32px;
+.lapse-buttons-filter {
+    position: relative;
+    margin-bottom: 16px;
 }
 
-.lapse-buttons-project-header {
-    margin-bottom: 12px;
-    padding-left: 12px;
-    border-left: 4px solid var(--background-modifier-border);
-}
-
-.lapse-buttons-project-title {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 600;
+.lapse-buttons-filter-input {
+    width: 100%;
+    padding: 8px 32px 8px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary);
     color: var(--text-normal);
+    font-size: 14px;
+}
+
+.lapse-buttons-filter-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+    box-shadow: 0 0 0 2px var(--interactive-accent-hover);
+}
+
+.lapse-buttons-filter-input::placeholder {
+    color: var(--text-muted);
+}
+
+.lapse-buttons-filter-clear {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+}
+
+.lapse-buttons-filter-clear:hover {
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+}
+
+.lapse-buttons-filter-clear svg {
+    width: 14px;
+    height: 14px;
+}
+
+.lapse-buttons-count {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: -8px 0 14px;
+    min-height: 1.2em;
+}
+
+.lapse-buttons-content {
+    /* Container for filtered results */
+}
+
+.lapse-buttons-project-section {
+    margin-bottom: 20px;
+    border-radius: 8px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+    overflow: hidden;
+}
+
+.lapse-buttons-project-section .lapse-buttons-project-header {
+    margin: 0;
+    padding: 10px 12px 10px 12px;
+    border-left: 4px solid var(--background-modifier-border);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    display: block;
+}
+
+.lapse-buttons-project-section .lapse-buttons-project-header::-webkit-details-marker {
+    display: none;
+}
+
+.lapse-buttons-project-section .lapse-buttons-project-title {
+    display: inline;
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text-normal);
+}
+
+.lapse-buttons-project-section .lapse-buttons-grid {
+    margin-top: 0;
+    padding: 8px 10px 14px;
+    border-top: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
 }
 
 .lapse-buttons-grid {
@@ -1434,10 +1657,16 @@
 
 .lapse-quick-start-modal {
     padding: 16px;
+    max-width: min(720px, 95vw);
 }
 
 .lapse-quick-start-modal .lapse-buttons-project-section {
     margin-bottom: 28px;
+}
+
+.lapse-quick-start-modal .lapse-button {
+    max-width: 100%;
+    width: min(100%, 280px);
 }
 
 .lapse-buttons-empty {

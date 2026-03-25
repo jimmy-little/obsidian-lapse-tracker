@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, MarkdownPostProcessorContext, TFile, setIcon, Modal } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, Workspace, WorkspaceLeaf, MarkdownPostProcessorContext, TFile, TFolder, setIcon, Modal } from 'obsidian';
 
 interface LapseSettings {
 	dateFormat: string;
@@ -9,6 +9,10 @@ interface LapseSettings {
 	totalTimeKey: string;
 	projectKey: string;
 	quickStartGroupByKey: string; // Frontmatter key to group Quick Start panel by (default: project)
+	/** Frontmatter key for gray “area” text on template Quick Start cards (Timery-style) */
+	quickStartAreaKey: string;
+	/** Frontmatter key for subtitle/description on template cards; defaults to note name if unset */
+	quickStartEntryKey: string;
 	defaultLabelType: 'freeText' | 'frontmatter' | 'fileName';
 	defaultLabelText: string;
 	defaultLabelFrontmatterKey: string;
@@ -21,10 +25,15 @@ interface LapseSettings {
 	excludedFolders: string[]; // Glob patterns for folders to exclude
 	showStatusBar: boolean; // Show active timer(s) in status bar
 	lapseButtonTemplatesFolder: string; // Folder containing templates for lapse-button inline buttons
+	/** Vault folder whose notes (and subfolders) become generic Quick Start timers */
+	defaultProjectFolder: string;
+	/** Folder or full path pattern for new timer notes; moment-style date tokens (YYYY, MM, DD, …) and {{project}}, {{title}} */
+	defaultTimerSavePath: string;
+	/** Markdown template path for new timer/calendar notes; supports {{project}}, {{title}}, {{date}}, date tokens */
+	defaultTimerTemplate: string;
 	showDurationOnNoteButtons: boolean; // Show duration on note buttons/links
 	noteButtonDurationType: 'project' | 'note'; // Type of duration to show (project or note)
 	noteButtonTimePeriod: 'today' | 'thisWeek' | 'thisMonth' | 'lastWeek' | 'lastMonth'; // Time period for duration
-	calendarDefaultTemplate: string; // Default template for notes created from calendar
 }
 
 const DEFAULT_SETTINGS: LapseSettings = {
@@ -36,6 +45,8 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	totalTimeKey: 'totalTimeTracked',
 	projectKey: 'project',
 	quickStartGroupByKey: 'project',
+	quickStartAreaKey: 'area',
+	quickStartEntryKey: 'entry',
 	defaultLabelType: 'freeText',
 	defaultLabelText: '',
 	defaultLabelFrontmatterKey: 'project',
@@ -48,10 +59,12 @@ const DEFAULT_SETTINGS: LapseSettings = {
 	excludedFolders: [], // No folders excluded by default
 	showStatusBar: true, // Show active timers in status bar by default
 	lapseButtonTemplatesFolder: 'Templates/Lapse Buttons', // Default folder for lapse button templates
+	defaultProjectFolder: '',
+	defaultTimerSavePath: '',
+	defaultTimerTemplate: '',
 	showDurationOnNoteButtons: false, // Don't show duration on note buttons by default
 	noteButtonDurationType: 'note', // Default to note
 	noteButtonTimePeriod: 'today', // Default to today
-	calendarDefaultTemplate: '' // No default template - user will be prompted
 }
 
 interface TimeEntry {
@@ -93,11 +106,18 @@ interface EntryCache {
 }
 
 interface TemplateData {
-	template: TFile;
+	kind: 'template' | 'project';
+	template: TFile | null;
 	templateName: string;
 	project: string | null;
 	projectColor: string | null;
 	groupValue: string | null; // Value of quickStartGroupByKey frontmatter, used for Quick Start grouping
+	/** For kind 'project': path to the project hub note, if any */
+	projectSourcePath?: string | null;
+	/** Template timers: gray subtitle after • (from quickStartAreaKey) */
+	area: string | null;
+	/** Bottom line: from quickStartEntryKey / description, else note basename */
+	timerDescription: string | null;
 }
 
 interface TemplateGroupResult {
@@ -110,6 +130,33 @@ interface NoteEntryGroup {
 	entries: TimeEntry[];
 }
 
+/** JSON-safe Quick Start row for other plugins (no TFile handles). */
+export interface LapseQuickStartItemPublic {
+	kind: 'template' | 'project';
+	/** Vault path to the template note when kind === 'template' */
+	templatePath: string | null;
+	templateName: string;
+	project: string | null;
+	projectColor: string | null;
+	groupValue: string | null;
+	projectSourcePath: string | null;
+	area: string | null;
+	timerDescription: string | null;
+}
+
+/**
+ * Stable surface for integration (project manager, etc.).
+ * Access: `app.plugins.getPlugin('lapse-tracker')?.api` or listen for `lapse-tracker:public-api-ready` on `window`.
+ */
+export interface LapsePublicApi {
+	readonly pluginId: 'lapse-tracker';
+	getQuickStartItems(): Promise<LapseQuickStartItemPublic[]>;
+	/** Same actions as Quick Start in Lapse; throws on invalid item or I/O errors. */
+	executeQuickStart(item: LapseQuickStartItemPublic): Promise<void>;
+	/** Clear Quick Start sidebar cache and refresh open Quick Start views */
+	invalidateQuickStartCache(): void;
+}
+
 export default class LapsePlugin extends Plugin {
 	settings: LapseSettings;
 	timeData: Map<string, PageTimeData> = new Map();
@@ -119,6 +166,10 @@ export default class LapsePlugin extends Plugin {
 	statusBarUpdateInterval: number | null = null; // Interval for updating status bar
 	pendingSaves: Promise<void>[] = []; // Track pending save operations
 	colorMeasurementEl: HTMLElement | null = null; // Hidden element for measuring computed colors
+	/** @see LapsePublicApi — duplicate reference as `api` for common plugin conventions */
+	lapsePublicApi!: Readonly<LapsePublicApi>;
+	/** Alias of {@link LapsePlugin.lapsePublicApi} for `getPlugin('lapse-tracker').api` */
+	api?: Readonly<LapsePublicApi>;
 
 	async onload() {
 		const pluginStartTime = Date.now();
@@ -475,6 +526,95 @@ export default class LapsePlugin extends Plugin {
 
 		const totalLoadTime = Date.now() - pluginStartTime;
 		console.log(`Lapse: Plugin loaded in ${totalLoadTime}ms`);
+
+		this.registerPublicIntegrationApi();
+	}
+
+	/** Build `lapsePublicApi` / `api`, fire `lapse-tracker:public-api-ready` for late-loading plugins */
+	registerPublicIntegrationApi(): void {
+		const api: LapsePublicApi = {
+			pluginId: 'lapse-tracker',
+			getQuickStartItems: async () => {
+				const list = await this.getTemplateDataList();
+				return list.map((d) => this.templateDataToPublic(d));
+			},
+			executeQuickStart: async (item) => {
+				await this.executeQuickStartPublic(item);
+			},
+			invalidateQuickStartCache: () => {
+				this.invalidateQuickStartCachesForIntegration();
+			}
+		};
+		this.lapsePublicApi = Object.freeze(api);
+		this.api = this.lapsePublicApi;
+
+		window.dispatchEvent(
+			new CustomEvent('lapse-tracker:public-api-ready', {
+				detail: { pluginId: 'lapse-tracker' as const, api: this.lapsePublicApi }
+			})
+		);
+	}
+
+	templateDataToPublic(data: TemplateData): LapseQuickStartItemPublic {
+		return {
+			kind: data.kind,
+			templatePath: data.template?.path ?? null,
+			templateName: data.templateName,
+			project: data.project,
+			projectColor: data.projectColor,
+			groupValue: data.groupValue,
+			projectSourcePath: data.projectSourcePath ?? null,
+			area: data.area ?? null,
+			timerDescription: data.timerDescription ?? null
+		};
+	}
+
+	fromPublicQuickStartItem(item: LapseQuickStartItemPublic): TemplateData | null {
+		let template: TFile | null = null;
+		if (item.kind === 'template') {
+			if (!item.templatePath) return null;
+			const f = this.app.vault.getAbstractFileByPath(item.templatePath);
+			if (!(f instanceof TFile)) return null;
+			template = f;
+		}
+		return {
+			kind: item.kind,
+			template,
+			templateName: item.templateName,
+			project: item.project,
+			projectColor: item.projectColor,
+			groupValue: item.groupValue,
+			projectSourcePath: item.projectSourcePath ?? null,
+			area: item.area,
+			timerDescription: item.timerDescription
+		};
+	}
+
+	async executeQuickStartPublic(item: LapseQuickStartItemPublic): Promise<void> {
+		const data = this.fromPublicQuickStartItem(item);
+		if (!data) {
+			throw new Error("Lapse: invalid quick start item (kind 'template' requires a valid templatePath)");
+		}
+		if (data.kind === 'project') {
+			if (!data.project) {
+				throw new Error('Lapse: project quick start item is missing project');
+			}
+			await this.createQuickStartFromProject(data.project, data.projectSourcePath ?? null);
+			return;
+		}
+		if (!data.template) {
+			throw new Error("Lapse: template quick start item is missing template file");
+		}
+		await this.createQuickStartFromTemplateFile(data.template, data.templateName);
+	}
+
+	invalidateQuickStartCachesForIntegration(): void {
+		this.app.workspace.getLeavesOfType('lapse-buttons').forEach((leaf) => {
+			const v = leaf.view;
+			if (v instanceof LapseButtonsView) {
+				v.invalidateQuickStartDataCache();
+			}
+		});
 	}
 
 	updateStatusBar() {
@@ -1220,24 +1360,9 @@ export default class LapsePlugin extends Plugin {
 				}
 			}
 			
-			// Handle click - create new note from template
 			button.onclick = async () => {
 				try {
-					// Use Obsidian's templater or just copy the template
-					const templateContent = await this.app.vault.read(templateFile);
-					
-					// Generate a new note name with timestamp
-					const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-					const newNoteName = `${templateName} ${timestamp}`;
-					
-					// Determine where to create the note (same folder as template or root)
-					const newNotePath = `${newNoteName}.md`;
-					
-					// Create the new note
-					const newFile = await this.app.vault.create(newNotePath, templateContent);
-					
-					// Open the new note
-					await this.app.workspace.getLeaf(false).openFile(newFile);
+					await this.createQuickStartFromTemplateFile(templateFile, templateName);
 				} catch (error) {
 					console.error('Error creating note from template:', error);
 				}
@@ -2251,8 +2376,12 @@ export default class LapsePlugin extends Plugin {
 	 * Calculate duration for a template button based on settings
 	 * Always aggregates across multiple notes based on the duration type
 	 */
-	async getTemplateButtonDuration(templateName: string, templateProject: string | null): Promise<number> {
-		if (!this.settings.showDurationOnNoteButtons) {
+	async getTemplateButtonDuration(
+		templateName: string,
+		templateProject: string | null,
+		opts?: { bypassShowSetting?: boolean; mode?: 'project' | 'note' }
+	): Promise<number> {
+		if (!opts?.bypassShowSetting && !this.settings.showDurationOnNoteButtons) {
 			return 0;
 		}
 
@@ -2261,8 +2390,9 @@ export default class LapsePlugin extends Plugin {
 		
 		let totalDuration = 0;
 		const markdownFiles = this.app.vault.getMarkdownFiles();
-		
-		if (this.settings.noteButtonDurationType === 'project') {
+		const durationType = opts?.mode ?? this.settings.noteButtonDurationType;
+
+		if (durationType === 'project') {
 			// Aggregate by project: include all notes with the same project
 			if (!templateProject) {
 				return 0; // No project, so no aggregate to show
@@ -3379,6 +3509,321 @@ export default class LapsePlugin extends Plugin {
 		return `${year}${month}${day}-${hours}${minutes}${seconds}`;
 	}
 
+	sanitizePathSegment(raw: string): string {
+		const t = raw.replace(/[\/\\:*?"<>|#\n\r]/g, '-').replace(/-+/g, '-').trim();
+		return t.length > 0 ? t : 'untitled';
+	}
+
+	/** Moment-style path tokens (YYYY, MM, DD, HH, mm, ss, …) plus {{project}}, {{title}} */
+	expandTimerPathTokens(pattern: string, date: Date, vars: { project?: string; title?: string }): string {
+		const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+		const y = date.getFullYear();
+		const M0 = date.getMonth();
+		const d = date.getDate();
+		const h = date.getHours();
+		const mi = date.getMinutes();
+		const s = date.getSeconds();
+		const dayMs = date.getDay();
+		const monthLong = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+		const monthShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+		const dayLong = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+		const dayShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+		let out = pattern
+			.replace(/\{\{project\}\}/gi, this.sanitizePathSegment(vars.project ?? ''))
+			.replace(/\{\{title\}\}/gi, this.sanitizePathSegment(vars.title ?? ''));
+
+		out = out
+			.replace(/YYYY/g, String(y))
+			.replace(/MMMM/g, monthLong[M0])
+			.replace(/MMM/g, monthShort[M0])
+			.replace(/MM/g, pad(M0 + 1))
+			.replace(/DD/g, pad(d))
+			.replace(/HH/g, pad(h))
+			.replace(/mm/g, pad(mi))
+			.replace(/ss/g, pad(s))
+			.replace(/dddd/g, dayLong[dayMs])
+			.replace(/ddd/g, dayShort[dayMs]);
+
+		return out.replace(/^[\/\\]+/, '').replace(/\\/g, '/');
+	}
+
+	/** Format `settings.dateFormat` using the same token set as paths (for {{date}} in templates). */
+	formatWithSettingsDatePattern(date: Date): string {
+		return this.expandTimerPathTokens(this.settings.dateFormat, date, {});
+	}
+
+	applyTimerTemplateVariables(body: string, vars: { project?: string; title?: string; date?: Date }): string {
+		const d = vars.date ?? new Date();
+		const dateStr = this.formatWithSettingsDatePattern(d);
+		return body
+			.replace(/\{\{project\}\}/g, vars.project ?? '')
+			.replace(/\{\{title\}\}/g, vars.title ?? '')
+			.replace(/\{\{date\}\}/g, dateStr)
+			.replace(/\{\{now\}\}/g, dateStr);
+	}
+
+	async ensureFolderPath(folderPath: string): Promise<void> {
+		const normalized = folderPath.replace(/\\/g, '/').replace(/\/+$/, '').trim();
+		if (!normalized) return;
+		const existing = this.app.vault.getAbstractFileByPath(normalized);
+		if (existing) return;
+		const parent = normalized.split('/').slice(0, -1).join('/');
+		if (parent) await this.ensureFolderPath(parent);
+		await this.app.vault.createFolder(normalized);
+	}
+
+	/**
+	 * Build vault-relative path for a new timer note.
+	 * If defaultTimerSavePath ends with .md, it is a full path pattern; otherwise a folder pattern and a default filename is appended.
+	 */
+	buildTimerNoteRelativePath(now: Date, vars: { project: string; title: string }): string {
+		const raw = this.settings.defaultTimerSavePath?.trim() ?? '';
+		const defaultFile = `{{project}}-${this.formatDateForFileName(now)}.md`;
+		let combined = raw;
+		if (!combined) {
+			combined = defaultFile;
+		} else if (!/\.md$/i.test(combined)) {
+			combined = `${combined.replace(/\/+$/, '')}/${defaultFile}`;
+		}
+		return this.expandTimerPathTokens(combined, now, vars);
+	}
+
+	async readAndApplyDefaultTimerTemplate(vars: { project: string; title: string; date: Date }): Promise<string> {
+		const path = this.settings.defaultTimerTemplate?.trim();
+		if (!path) {
+			const pk = this.settings.projectKey;
+			const ek = this.settings.entriesKey;
+			const tagLine =
+				this.settings.defaultTagOnNote.trim().length > 0
+					? `tags: ["${this.normalizeTagValue(this.settings.defaultTagOnNote)}"]\n`
+					: '';
+			return (
+				`---\n${tagLine}${pk}: ${vars.project ? JSON.stringify(vars.project) : '""'}\n${ek}: []\n---\n\n# ${vars.title || vars.project || 'Timer'}\n`
+			);
+		}
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (!f || !(f instanceof TFile)) {
+			throw new Error(`Default timer template not found: ${path}`);
+		}
+		const raw = await this.app.vault.read(f);
+		// File templates: only substitute {{project}} / {{date}} / etc. Do not run path-style
+		// token expansion on the whole body — it breaks Templater (e.g. tp.date.now("YYYY-MM-DD")).
+		return this.applyTimerTemplateVariables(raw, vars);
+	}
+
+	async openTimerNoteInNewTab(file: TFile): Promise<void> {
+		const ws = this.app.workspace as Workspace & { getLeaf(split?: boolean | 'tab'): WorkspaceLeaf };
+		const leaf = ws.getLeaf('tab');
+		await leaf.openFile(file);
+	}
+
+	async createTimerNoteFromContent(relativePath: string, body: string): Promise<TFile> {
+		const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+		const lastSlash = normalized.lastIndexOf('/');
+		const dir = lastSlash >= 0 ? normalized.slice(0, lastSlash) : '';
+		const fileName = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+		if (!fileName.toLowerCase().endsWith('.md')) {
+			throw new Error(`Timer save path must end with .md (got: ${fileName})`);
+		}
+		if (dir) await this.ensureFolderPath(dir);
+		let finalPath = normalized;
+		let n = 0;
+		while (this.app.vault.getAbstractFileByPath(finalPath)) {
+			n++;
+			const base = fileName.slice(0, -3);
+			finalPath = (dir ? `${dir}/` : '') + `${base}-${n}.md`;
+		}
+		return this.app.vault.create(finalPath, body);
+	}
+
+	getDefaultLabelForNewTimer(project: string, noteTitle: string): string {
+		switch (this.settings.defaultLabelType) {
+			case 'freeText':
+				return this.settings.defaultLabelText?.trim() || project || noteTitle || 'Timer';
+			case 'frontmatter':
+				return project || noteTitle || 'Timer';
+			case 'fileName':
+				return this.settings.removeTimestampFromFileName ? this.removeTimestampFromFileName(noteTitle) : noteTitle;
+			default:
+				return project || noteTitle || 'Timer';
+		}
+	}
+
+	async seedRunningTimerAndSave(file: TFile, label: string, project: string): Promise<void> {
+		await this.loadEntriesFromFrontmatter(file.path);
+		let pageData = this.timeData.get(file.path);
+		if (!pageData) {
+			pageData = { entries: [], totalTimeTracked: 0 };
+			this.timeData.set(file.path, pageData);
+		}
+		const now = Date.now();
+		const tags = this.getDefaultTags();
+		const idx = pageData.entries.length;
+		const entry: TimeEntry = {
+			id: `${file.path}-${idx}-${now}`,
+			label,
+			startTime: now,
+			endTime: null,
+			duration: 0,
+			isPaused: false,
+			tags
+		};
+		pageData.entries.push(entry);
+		await this.updateFrontmatter(file.path);
+		await this.addDefaultTagToNote(file.path);
+	}
+
+	async createQuickStartFromProject(project: string, projectSourcePath: string | null): Promise<void> {
+		const now = new Date();
+		const title = project;
+		const body = await this.readAndApplyDefaultTimerTemplate({ project, title, date: now });
+		const rel = this.buildTimerNoteRelativePath(now, { project, title });
+		const file = await this.createTimerNoteFromContent(rel, body);
+		// Only inject a running timer + Lapse frontmatter sync for the minimal blank note. If the user
+		// configured a template file (e.g. Templater), the file content is authoritative — do not rewrite YAML.
+		const usesBlankMinimalNote = !this.settings.defaultTimerTemplate?.trim();
+		if (usesBlankMinimalNote) {
+			const label = this.getDefaultLabelForNewTimer(project, file.basename);
+			await this.seedRunningTimerAndSave(file, label, project);
+		}
+		await this.openTimerNoteInNewTab(file);
+	}
+
+	/** New note from a Quick Start / inline template file (does not auto-start a timer). */
+	async createQuickStartFromTemplateFile(template: TFile, templateName: string): Promise<void> {
+		const now = new Date();
+		let project: string | null = null;
+		try {
+			project = await this.getProjectFromFrontmatter(template.path);
+		} catch {
+			project = null;
+		}
+		const projStr = project ?? '';
+		const title = templateName;
+		const rawBody = await this.app.vault.read(template);
+		// Do not expand YYYY/MM/etc. over the full template — breaks Templater and other syntax.
+		const body = this.applyTimerTemplateVariables(rawBody, { project: projStr, title, date: now });
+		const rel = this.buildTimerNoteRelativePath(now, { project: projStr || title, title });
+		const file = await this.createTimerNoteFromContent(rel, body);
+		await this.openTimerNoteInNewTab(file);
+	}
+
+	async createNoteFromQuickStart(data: TemplateData, onNoteCreated?: () => void): Promise<void> {
+		try {
+			if (data.kind === 'project') {
+				if (!data.project) return;
+				await this.createQuickStartFromProject(data.project, data.projectSourcePath ?? null);
+			} else if (data.template) {
+				await this.createQuickStartFromTemplateFile(data.template, data.templateName);
+			}
+			onNoteCreated?.();
+		} catch (e) {
+			console.error('Lapse: create note from Quick Start failed:', e);
+		}
+	}
+
+	async parseFrontmatterScalarFromPath(filePath: string, key: string): Promise<string | null> {
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (!file || !(file instanceof TFile)) return null;
+		try {
+			const content = await this.app.vault.read(file);
+			const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+			const match = content.match(frontmatterRegex);
+			if (!match) return null;
+			const lines = match[1].split('\n');
+			for (const line of lines) {
+				if (line.trim().startsWith(`${key}:`)) {
+					let val = line.split(':').slice(1).join(':').trim();
+					if (val) {
+						val = val.replace(/\[\[/g, '').replace(/\]\]/g, '');
+						val = val.replace(/^["']+|["']+$/g, '');
+						val = val.trim();
+					}
+					return val || null;
+				}
+			}
+		} catch {
+			return null;
+		}
+		return null;
+	}
+
+	async getProjectFolderQuickStartEntries(groupByKey: string): Promise<TemplateData[]> {
+		const folderPath = this.settings.defaultProjectFolder?.trim().replace(/\/+$/, '');
+		if (!folderPath) return [];
+		const folder = this.app.vault.getAbstractFileByPath(folderPath);
+		if (!folder || !(folder instanceof TFolder)) return [];
+
+		const areaKey = this.settings.quickStartAreaKey?.trim() || 'area';
+		const entryKey = this.settings.quickStartEntryKey?.trim() || 'entry';
+		const list: TemplateData[] = [];
+		for (const child of folder.children) {
+			if (child instanceof TFile && child.extension === 'md') {
+				const fromFm = await this.getProjectFromFrontmatter(child.path);
+				const projectName = (fromFm?.trim() || child.basename).trim();
+				const projectColor = await this.getProjectColor(projectName);
+				const groupValue =
+					groupByKey === this.settings.projectKey
+						? projectName
+						: (await this.parseFrontmatterScalarFromPath(child.path, groupByKey)) ?? projectName;
+				let area: string | null = null;
+				let timerDescription: string | null = projectName;
+				try {
+					const content = await this.app.vault.read(child);
+					const fm = content.match(/^---\n([\s\S]*?)\n---/);
+					if (fm) {
+						const lines = fm[1].split('\n');
+						const parseKey = (key: string): string | null => {
+							for (const line of lines) {
+								if (line.trim().startsWith(`${key}:`)) {
+									let val = line.split(':').slice(1).join(':').trim();
+									if (val) {
+										val = val.replace(/\[\[/g, '').replace(/\]\]/g, '');
+										val = val.replace(/^["']+|["']+$/g, '').trim();
+									}
+									return val || null;
+								}
+							}
+							return null;
+						};
+						area = parseKey(areaKey);
+						const entryVal = parseKey(entryKey) ?? parseKey('description');
+						timerDescription = (entryVal?.trim() || projectName);
+					}
+				} catch {
+					/* keep defaults */
+				}
+				list.push({
+					kind: 'project',
+					template: null,
+					templateName: projectName,
+					project: projectName,
+					projectColor,
+					groupValue,
+					projectSourcePath: child.path,
+					area,
+					timerDescription
+				});
+			} else if (child instanceof TFolder) {
+				const projectName = child.name;
+				const projectColor = await this.getProjectColor(projectName);
+				list.push({
+					kind: 'project',
+					template: null,
+					templateName: projectName,
+					project: projectName,
+					projectColor,
+					groupValue: projectName,
+					projectSourcePath: null,
+					area: null,
+					timerDescription: projectName
+				});
+			}
+		}
+		return list.sort((a, b) => a.templateName.localeCompare(b.templateName));
+	}
+
 	parseDatetimeLocal(value: string): number | null {
 		if (!value) {
 			return null;
@@ -3676,6 +4121,11 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async onunload() {
+		this.api = undefined;
+		window.dispatchEvent(
+			new CustomEvent('lapse-tracker:public-api-unload', { detail: { pluginId: 'lapse-tracker' as const } })
+		);
+
 		// Clean up status bar interval
 		if (this.statusBarUpdateInterval) {
 			window.clearInterval(this.statusBarUpdateInterval);
@@ -3702,8 +4152,12 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const data = await this.loadData();
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+		const data = (await this.loadData()) as Record<string, unknown>;
+		// Migrate renamed calendar template setting
+		if (data.defaultTimerTemplate === undefined && typeof data.calendarDefaultTemplate === 'string') {
+			data.defaultTimerTemplate = data.calendarDefaultTemplate;
+		}
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data) as LapseSettings;
 		
 		// Don't load the large cache on startup - use on-demand loading instead
 		// This allows plugin to load instantly
@@ -3817,69 +4271,84 @@ export default class LapsePlugin extends Plugin {
 	}
 
 	async getTemplateDataList(): Promise<TemplateData[]> {
-		const templateFolder = this.settings.lapseButtonTemplatesFolder;
-		if (!templateFolder) {
-			return [];
-		}
-
-		const normalizedFolder = templateFolder.endsWith('/') ? templateFolder : `${templateFolder}/`;
-		const files = this.app.vault.getMarkdownFiles();
-		const templates = files.filter(file => file.path.startsWith(normalizedFolder));
-
 		const templateDataList: TemplateData[] = [];
-
 		const groupByKey = this.settings.quickStartGroupByKey?.trim() || this.settings.projectKey;
 
-		for (const template of templates) {
-			let project: string | null = null;
-			let projectColor: string | null = null;
-			let groupValue: string | null = null;
+		const templateFolder = this.settings.lapseButtonTemplatesFolder?.trim();
+		if (templateFolder) {
+			const normalizedFolder = templateFolder.endsWith('/') ? templateFolder : `${templateFolder}/`;
+			const files = this.app.vault.getMarkdownFiles();
+			const templates = files.filter(file => file.path.startsWith(normalizedFolder));
 
-			try {
-				const content = await this.app.vault.read(template);
-				const frontmatterRegex = /---\n([\s\S]*?)\n---/;
-				const match = content.match(frontmatterRegex);
+			const areaKey = this.settings.quickStartAreaKey?.trim() || 'area';
+			const entryKey = this.settings.quickStartEntryKey?.trim() || 'entry';
 
-				if (match) {
-					const frontmatter = match[1];
-					const lines = frontmatter.split('\n');
+			for (const template of templates) {
+				let project: string | null = null;
+				let projectColor: string | null = null;
+				let groupValue: string | null = null;
+				let area: string | null = null;
+				let timerDescription: string | null = template.basename;
 
-					const parseKey = (key: string): string | null => {
-						for (const line of lines) {
-							if (line.trim().startsWith(`${key}:`)) {
-								let val = line.split(':').slice(1).join(':').trim();
-								if (val) {
-									val = val.replace(/\[\[/g, '').replace(/\]\]/g, '');
-									val = val.replace(/^["']+|["']+$/g, '');
-									val = val.trim();
+				try {
+					const content = await this.app.vault.read(template);
+					const frontmatterRegex = /---\n([\s\S]*?)\n---/;
+					const match = content.match(frontmatterRegex);
+
+					if (match) {
+						const frontmatter = match[1];
+						const lines = frontmatter.split('\n');
+
+						const parseKey = (key: string): string | null => {
+							for (const line of lines) {
+								if (line.trim().startsWith(`${key}:`)) {
+									let val = line.split(':').slice(1).join(':').trim();
+									if (val) {
+										val = val.replace(/\[\[/g, '').replace(/\]\]/g, '');
+										val = val.replace(/^["']+|["']+$/g, '');
+										val = val.trim();
+									}
+									return val || null;
 								}
-								return val || null;
 							}
-						}
-						return null;
-					};
+							return null;
+						};
 
-					project = parseKey(this.settings.projectKey);
-					groupValue = groupByKey === this.settings.projectKey ? project : parseKey(groupByKey);
+						project = parseKey(this.settings.projectKey);
+						groupValue = groupByKey === this.settings.projectKey ? project : parseKey(groupByKey);
+						area = parseKey(areaKey);
+						const entryVal = parseKey(entryKey) ?? parseKey('description');
+						timerDescription = (entryVal?.trim() || template.basename);
+					}
+
+					if (project) {
+						projectColor = await this.getProjectColor(project);
+					}
+				} catch (error) {
+					console.error('Error reading template for Quick Start:', error);
 				}
 
-				if (project) {
-					projectColor = await this.getProjectColor(project);
-				}
-			} catch (error) {
-				console.error('Error reading template for Quick Start:', error);
+				templateDataList.push({
+					kind: 'template',
+					template,
+					templateName: template.basename,
+					project,
+					projectColor,
+					groupValue,
+					area,
+					timerDescription
+				});
 			}
-
-			templateDataList.push({
-				template,
-				templateName: template.basename,
-				project,
-				projectColor,
-				groupValue
-			});
 		}
 
-		templateDataList.sort((a, b) => a.templateName.localeCompare(b.templateName));
+		templateDataList.push(...(await this.getProjectFolderQuickStartEntries(groupByKey)));
+
+		templateDataList.sort((a, b) => {
+			const byName = a.templateName.localeCompare(b.templateName);
+			if (byName !== 0) return byName;
+			if (a.kind === b.kind) return 0;
+			return a.kind === 'template' ? -1 : 1;
+		});
 		return templateDataList;
 	}
 
@@ -3904,87 +4373,141 @@ export default class LapsePlugin extends Plugin {
 	}
 }
 
-async function appendQuickStartButton(container: HTMLElement, plugin: LapsePlugin, data: TemplateData, onNoteCreated?: () => void) {
-	const button = container.createEl('button', { cls: 'lapse-button' }) as HTMLElement;
-	button.setAttribute('type', 'button');
-	
-	// Build button structure with two lines
-	const topLine = button.createDiv({ cls: 'lapse-button-name' }) as HTMLElement;
-	topLine.style.display = 'flex';
-	topLine.style.justifyContent = 'flex-start';
-	topLine.style.alignItems = 'center';
-	topLine.style.gap = '8px';
-	topLine.style.minWidth = '0';
-	
-	const titleEl = topLine.createSpan({ cls: 'lapse-button-title' });
-	titleEl.textContent = data.templateName;
-	titleEl.style.overflow = 'hidden';
-	titleEl.style.textOverflow = 'ellipsis';
-	titleEl.style.whiteSpace = 'nowrap';
-	titleEl.style.flex = '1';
-	titleEl.style.minWidth = '0';
-	titleEl.style.textAlign = 'left';
-	
-	if (plugin.settings.showDurationOnNoteButtons) {
-		try {
-			const duration = await plugin.getTemplateButtonDuration(data.templateName, data.project);
-			if (duration > 0) {
-				const durationText = plugin.formatTimeForButton(duration);
-				const durationEl = topLine.createSpan({ cls: 'lapse-button-duration' });
-				durationEl.textContent = durationText;
-				durationEl.style.flexShrink = '0';
-				durationEl.style.marginLeft = 'auto';
+/** One field: substring, word-prefix, or multi-token initials (e.g. "b t" → "Bolt Taxonomy"). */
+function textMatchesQuickStartFilter(text: string, normalizedFilter: string): boolean {
+	if (!normalizedFilter) return true;
+	const normalizedName = text.toLowerCase();
+	if (normalizedName.includes(normalizedFilter)) return true;
+	const filterParts = normalizedFilter.split(/\s+/).filter(p => p.length > 0);
+	if (filterParts.length > 1) {
+		const words = text.split(/[\s\-_]+/).filter(w => w.length > 0);
+		let wordIndex = 0;
+		for (const part of filterParts) {
+			let found = false;
+			while (wordIndex < words.length) {
+				if (words[wordIndex].toLowerCase().startsWith(part)) {
+					found = true;
+					wordIndex++;
+					break;
+				}
+				wordIndex++;
 			}
-		} catch (error) {
-			console.error('Error calculating duration for Quick Start button:', error);
+			if (!found) return false;
 		}
+		return true;
+	}
+	const words = text.split(/[\s\-_]+/).filter(w => w.length > 0);
+	return words.some(word => word.toLowerCase().startsWith(normalizedFilter));
+}
+
+function matchesQuickStartFilter(data: TemplateData, filter: string): boolean {
+	if (!filter.trim()) return true;
+	const f = filter.toLowerCase().trim();
+	if (textMatchesQuickStartFilter(data.templateName, f)) return true;
+	if (data.project && textMatchesQuickStartFilter(data.project, f)) return true;
+	if (data.groupValue && textMatchesQuickStartFilter(data.groupValue, f)) return true;
+	if (data.area && textMatchesQuickStartFilter(data.area, f)) return true;
+	if (data.timerDescription && textMatchesQuickStartFilter(data.timerDescription, f)) return true;
+	return false;
+}
+
+function noteButtonPeriodShortLabel(period: LapseSettings['noteButtonTimePeriod']): string {
+	switch (period) {
+		case 'today':
+			return 'Today';
+		case 'thisWeek':
+			return 'This week';
+		case 'thisMonth':
+			return 'This month';
+		case 'lastWeek':
+			return 'Last week';
+		case 'lastMonth':
+			return 'Last month';
+		default:
+			return 'Today';
+	}
+}
+
+async function appendQuickStartButton(container: HTMLElement, plugin: LapsePlugin, data: TemplateData, onNoteCreated?: () => void) {
+	const button = container.createEl('button', {
+		cls: 'lapse-button lapse-button--timery',
+		attr: {
+			type: 'button',
+			'aria-label': `Start timer: ${data.timerDescription ?? data.templateName}`
+		}
+	}) as HTMLElement;
+
+	const accent = data.projectColor || '';
+	if (accent) {
+		button.style.borderLeftColor = accent;
+		button.style.setProperty('--lapse-timer-accent', accent);
+		button.style.setProperty('--lapse-play-bg', accent);
+		button.style.setProperty('--lapse-play-fg', plugin.getContrastColor(accent));
 	}
 
-	if (data.project) {
-		const projectEl = button.createDiv({ cls: 'lapse-button-project' });
-		projectEl.textContent = data.project;
-		
-		if (data.projectColor) {
-			button.style.borderLeftColor = data.projectColor;
-			projectEl.style.backgroundColor = data.projectColor;
-			projectEl.style.color = plugin.getContrastColor(data.projectColor);
-		}
+	const playWrap = button.createSpan({ cls: 'lapse-button-play', attr: { 'aria-hidden': 'true' } });
+	setIcon(playWrap, 'play');
+
+	const body = button.createDiv({ cls: 'lapse-button-body' });
+	const topRow = body.createDiv({ cls: 'lapse-button-top' });
+
+	const titleBlock = topRow.createDiv({ cls: 'lapse-button-title-block' });
+	const projectLabel = data.project?.trim() || data.templateName;
+	const projectEl = titleBlock.createSpan({ cls: 'lapse-button-project-name' });
+	projectEl.textContent = projectLabel;
+	if (accent) {
+		projectEl.style.color = accent;
 	}
+
+	const areaText = data.area?.trim() ?? '';
+	if (areaText) {
+		titleBlock.createSpan({ cls: 'lapse-button-bullet', text: ' • ' });
+		const areaEl = titleBlock.createSpan({ cls: 'lapse-button-area' });
+		areaEl.textContent = areaText;
+	}
+
+	const meta = topRow.createDiv({ cls: 'lapse-button-meta' });
+	meta.createSpan({ cls: 'lapse-button-period', text: noteButtonPeriodShortLabel(plugin.settings.noteButtonTimePeriod) });
+	// Timery cards always show time for the configured period (bypasses “show on inline buttons” setting).
+	try {
+		const durationMode =
+			data.kind === 'project' ? 'project' : plugin.settings.noteButtonDurationType;
+		const duration = await plugin.getTemplateButtonDuration(data.templateName, data.project, {
+			bypassShowSetting: true,
+			mode: durationMode
+		});
+		const durationText = plugin.formatTimeForButton(Math.max(0, duration));
+		meta.createSpan({ cls: 'lapse-button-meta-sep', text: '·' });
+		meta.createSpan({ cls: 'lapse-button-duration', text: durationText });
+	} catch (error) {
+		console.error('Error calculating duration for Quick Start button:', error);
+	}
+
+	const desc = body.createDiv({ cls: 'lapse-button-desc' });
+	desc.textContent = data.timerDescription ?? data.templateName;
 
 	button.onclick = async () => {
-		try {
-			const templateContent = await plugin.app.vault.read(data.template);
-			const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-			const newNoteName = `${data.templateName} ${timestamp}`;
-			const newNotePath = `${newNoteName}.md`;
-
-			const newFile = await plugin.app.vault.create(newNotePath, templateContent);
-			await plugin.app.workspace.getLeaf(false).openFile(newFile);
-			if (onNoteCreated) {
-				onNoteCreated();
-			}
-		} catch (error) {
-			console.error('Error creating note from template:', error);
-		}
+		await plugin.createNoteFromQuickStart(data, onNoteCreated);
 	};
 }
 
 async function renderTemplateGroups(container: HTMLElement, plugin: LapsePlugin, groupResult: TemplateGroupResult, onNoteCreated?: () => void) {
 	for (const projectKey of groupResult.sortedProjects) {
 		const projectTemplates = groupResult.grouped.get(projectKey)!;
-		const projectSection = container.createDiv({ cls: 'lapse-buttons-project-section' });
-		const projectHeader = projectSection.createDiv({ cls: 'lapse-buttons-project-header' });
-	const title = projectHeader.createEl('h3', { text: projectKey, cls: 'lapse-buttons-project-title' }) as HTMLElement;
-		
+		const details = container.createEl('details', { cls: 'lapse-buttons-project-section' });
+		details.open = true;
+		const summary = details.createEl('summary', { cls: 'lapse-buttons-project-header' });
+		const title = summary.createEl('h3', { text: projectKey, cls: 'lapse-buttons-project-title' }) as HTMLElement;
+
 		if (projectKey !== 'No Project') {
 			const sectionColor = await plugin.getProjectColor(projectKey) ?? projectTemplates[0].projectColor;
 			if (sectionColor) {
-				projectHeader.style.borderLeftColor = sectionColor;
+				summary.style.borderLeftColor = sectionColor;
 				title.style.color = sectionColor;
 			}
 		}
-		
-		const buttonsGrid = projectSection.createDiv({ cls: 'lapse-buttons-grid' });
+
+		const buttonsGrid = details.createDiv({ cls: 'lapse-buttons-grid' });
 		for (const data of projectTemplates) {
 			await appendQuickStartButton(buttonsGrid, plugin, data, onNoteCreated);
 		}
@@ -4615,6 +5138,11 @@ class LapseSidebarView extends ItemView {
 
 class LapseQuickStartModal extends Modal {
 	plugin: LapsePlugin;
+	templateListCache: TemplateData[] = [];
+	filterText: string = '';
+	contentContainer: HTMLElement | null = null;
+	countStatEl: HTMLElement | null = null;
+	filterDebounceHandle: number | null = null;
 
 	constructor(app: App, plugin: LapsePlugin) {
 		super(app);
@@ -4624,28 +5152,124 @@ class LapseQuickStartModal extends Modal {
 	async onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
+		this.filterText = '';
+		this.contentContainer = null;
+		this.countStatEl = null;
+		if (this.filterDebounceHandle !== null) {
+			window.clearTimeout(this.filterDebounceHandle);
+			this.filterDebounceHandle = null;
+		}
+
 		contentEl.addClass('lapse-quick-start-modal');
 		contentEl.createEl('h2', { text: 'Quick Start' });
 
 		try {
-			const templateDataList = await this.plugin.getTemplateDataList();
-			if (templateDataList.length === 0) {
+			this.templateListCache = await this.plugin.getTemplateDataList();
+			if (this.templateListCache.length === 0) {
 				contentEl.createEl('p', {
-					text: `No templates found in ${this.plugin.settings.lapseButtonTemplatesFolder}`,
+					text: 'No Quick Start items: add templates under your templates folder and/or set a default project folder in Lapse settings.',
 					cls: 'mod-warning'
 				});
 				return;
 			}
 
-			const groupResult = this.plugin.groupTemplateData(templateDataList);
-			await renderTemplateGroups(contentEl, this.plugin, groupResult, () => this.close());
+			const filterContainer = contentEl.createDiv({ cls: 'lapse-buttons-filter' });
+			const filterInput = filterContainer.createEl('input', {
+				cls: 'lapse-buttons-filter-input',
+				attr: {
+					type: 'text',
+					placeholder: 'Filter by name, project, or initials…',
+					'aria-label': 'Filter timers'
+				}
+			}) as HTMLInputElement;
+
+			const clearBtn = filterContainer.createEl('button', {
+				cls: 'lapse-buttons-filter-clear clickable-icon',
+				attr: { 'aria-label': 'Clear filter' }
+			});
+			setIcon(clearBtn, 'x');
+			clearBtn.style.display = 'none';
+
+			clearBtn.onclick = () => {
+				this.filterText = '';
+				filterInput.value = '';
+				clearBtn.style.display = 'none';
+				if (this.filterDebounceHandle !== null) {
+					window.clearTimeout(this.filterDebounceHandle);
+					this.filterDebounceHandle = null;
+				}
+				void this.renderModalContent();
+			};
+
+			filterInput.oninput = () => {
+				this.filterText = filterInput.value;
+				clearBtn.style.display = this.filterText ? 'flex' : 'none';
+				if (this.filterDebounceHandle !== null) window.clearTimeout(this.filterDebounceHandle);
+				this.filterDebounceHandle = window.setTimeout(() => {
+					this.filterDebounceHandle = null;
+					void this.renderModalContent();
+				}, 120);
+			};
+
+			filterInput.onkeydown = (e) => {
+				if (e.key === 'Escape' && this.filterText.trim()) {
+					e.preventDefault();
+					e.stopPropagation();
+					this.filterText = '';
+					filterInput.value = '';
+					clearBtn.style.display = 'none';
+					if (this.filterDebounceHandle !== null) {
+						window.clearTimeout(this.filterDebounceHandle);
+						this.filterDebounceHandle = null;
+					}
+					void this.renderModalContent();
+				}
+			};
+
+			this.countStatEl = contentEl.createDiv({ cls: 'lapse-buttons-count' });
+			this.contentContainer = contentEl.createDiv({ cls: 'lapse-buttons-content' });
+			await this.renderModalContent();
+
+			window.requestAnimationFrame(() => filterInput.focus());
 		} catch (error) {
 			console.error('Error rendering Quick Start modal:', error);
 			contentEl.createEl('p', { text: 'Unable to load templates', cls: 'mod-warning' });
 		}
 	}
 
+	async renderModalContent() {
+		if (!this.contentContainer || !this.countStatEl) return;
+		this.contentContainer.empty();
+
+		const total = this.templateListCache.length;
+		const filtered = this.templateListCache.filter(d => matchesQuickStartFilter(d, this.filterText));
+
+		if (this.filterText.trim()) {
+			this.countStatEl.textContent =
+				filtered.length === total
+					? `${total} timer${total === 1 ? '' : 's'}`
+					: `Showing ${filtered.length} of ${total} timers`;
+		} else {
+			this.countStatEl.textContent = `${total} timer${total === 1 ? '' : 's'}`;
+		}
+
+		if (filtered.length === 0) {
+			this.contentContainer.createEl('p', {
+				text: 'No timers match your filter.',
+				cls: 'lapse-buttons-empty'
+			});
+			return;
+		}
+
+		const groupResult = this.plugin.groupTemplateData(filtered);
+		await renderTemplateGroups(this.contentContainer, this.plugin, groupResult, () => this.close());
+	}
+
 	onClose() {
+		if (this.filterDebounceHandle !== null) {
+			window.clearTimeout(this.filterDebounceHandle);
+			this.filterDebounceHandle = null;
+		}
 		this.contentEl.empty();
 	}
 }
@@ -4818,6 +5442,14 @@ class LapseGridView extends ItemView {
 
 class LapseButtonsView extends ItemView {
 	plugin: LapsePlugin;
+	filterText: string = '';
+	contentContainer: HTMLElement | null = null;
+	countStatEl: HTMLElement | null = null;
+	/** Avoid re-reading every template file on each filter keystroke */
+	templateListCache: TemplateData[] | null = null;
+	filterDebounceHandle: number | null = null;
+	filterInputEl: HTMLInputElement | null = null;
+	private filterFocusApplied = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: LapsePlugin) {
 		super(leaf);
@@ -4841,7 +5473,19 @@ class LapseButtonsView extends ItemView {
 	}
 
 	async onClose() {
-		// Cleanup if needed
+		if (this.filterDebounceHandle !== null) {
+			window.clearTimeout(this.filterDebounceHandle);
+			this.filterDebounceHandle = null;
+		}
+		this.filterFocusApplied = false;
+	}
+
+	/** Clears cached Quick Start list; used by the public integration API. */
+	invalidateQuickStartDataCache(): void {
+		this.templateListCache = null;
+		if (this.contentContainer) {
+			void this.renderContent();
+		}
 	}
 
 	async render() {
@@ -4852,35 +5496,126 @@ class LapseButtonsView extends ItemView {
 		// Header
 		const header = container.createDiv({ cls: 'lapse-buttons-header' });
 		header.createEl('h2', { text: 'Quick Start' });
-		
-		// Header buttons container
+
 		const headerButtons = header.createDiv({ cls: 'lapse-buttons-header-buttons' });
-		
-		// Refresh button
-		const refreshBtn = headerButtons.createEl('button', { 
+
+		const refreshBtn = headerButtons.createEl('button', {
 			cls: 'lapse-buttons-refresh-btn clickable-icon',
-			attr: { 'aria-label': 'Refresh' }
+			attr: { 'aria-label': 'Refresh template list' }
 		});
 		setIcon(refreshBtn, 'refresh-cw');
 		refreshBtn.onclick = async () => {
-			// Re-render to rebuild buttons (e.g., after adding a new template)
-			await this.render();
+			this.templateListCache = null;
+			await this.renderContent();
 		};
 
-		// Get pre-built template data
-		const templateFolder = this.plugin.settings.lapseButtonTemplatesFolder;
-		const templateDataList = await this.plugin.getTemplateDataList();
+		const filterContainer = container.createDiv({ cls: 'lapse-buttons-filter' });
+		const filterInput = filterContainer.createEl('input', {
+			cls: 'lapse-buttons-filter-input',
+			attr: {
+				type: 'text',
+				placeholder: 'Filter by name, project, or initials…',
+				'aria-label': 'Filter timers'
+			}
+		}) as HTMLInputElement;
+		this.filterInputEl = filterInput;
+		filterInput.value = this.filterText;
+
+		const clearBtn = filterContainer.createEl('button', {
+			cls: 'lapse-buttons-filter-clear clickable-icon',
+			attr: { 'aria-label': 'Clear filter' }
+		});
+		setIcon(clearBtn, 'x');
+		clearBtn.style.display = this.filterText ? 'flex' : 'none';
+
+		const scheduleContentRefresh = () => {
+			if (this.filterDebounceHandle !== null) window.clearTimeout(this.filterDebounceHandle);
+			this.filterDebounceHandle = window.setTimeout(() => {
+				this.filterDebounceHandle = null;
+				void this.renderContent();
+			}, 120);
+		};
+
+		clearBtn.onclick = () => {
+			this.filterText = '';
+			filterInput.value = '';
+			clearBtn.style.display = 'none';
+			if (this.filterDebounceHandle !== null) {
+				window.clearTimeout(this.filterDebounceHandle);
+				this.filterDebounceHandle = null;
+			}
+			void this.renderContent();
+		};
+
+		filterInput.oninput = () => {
+			this.filterText = filterInput.value;
+			clearBtn.style.display = this.filterText ? 'flex' : 'none';
+			scheduleContentRefresh();
+		};
+
+		filterInput.onkeydown = (e) => {
+			if (e.key === 'Escape' && this.filterText.trim()) {
+				e.preventDefault();
+				this.filterText = '';
+				filterInput.value = '';
+				clearBtn.style.display = 'none';
+				if (this.filterDebounceHandle !== null) {
+					window.clearTimeout(this.filterDebounceHandle);
+					this.filterDebounceHandle = null;
+				}
+				void this.renderContent();
+			}
+		};
+
+		this.countStatEl = container.createDiv({ cls: 'lapse-buttons-count' });
+		this.contentContainer = container.createDiv({ cls: 'lapse-buttons-content' });
+		await this.renderContent();
+
+		if (!this.filterFocusApplied) {
+			this.filterFocusApplied = true;
+			window.requestAnimationFrame(() => this.filterInputEl?.focus());
+		}
+	}
+
+	async renderContent() {
+		if (!this.contentContainer || !this.countStatEl) return;
+		this.contentContainer.empty();
+
+		if (this.templateListCache === null) {
+			this.templateListCache = await this.plugin.getTemplateDataList();
+		}
+		const templateDataList = this.templateListCache;
 
 		if (templateDataList.length === 0) {
-			container.createEl('p', { 
-				text: `No templates found in ${templateFolder}. Configure your template folder in Lapse settings.`,
+			this.countStatEl.textContent = '0 timers';
+			this.contentContainer.createEl('p', {
+				text: 'No Quick Start items yet. Set the templates folder and/or default project folder in Lapse settings.',
 				cls: 'lapse-buttons-empty'
 			});
 			return;
 		}
 
-		const groupResult = this.plugin.groupTemplateData(templateDataList);
-		await renderTemplateGroups(container, this.plugin, groupResult);
+		const filteredTemplates = templateDataList.filter(data => matchesQuickStartFilter(data, this.filterText));
+
+		if (this.filterText.trim()) {
+			this.countStatEl.textContent =
+				filteredTemplates.length === templateDataList.length
+					? `${templateDataList.length} timer${templateDataList.length === 1 ? '' : 's'}`
+					: `Showing ${filteredTemplates.length} of ${templateDataList.length} timers`;
+		} else {
+			this.countStatEl.textContent = `${templateDataList.length} timer${templateDataList.length === 1 ? '' : 's'}`;
+		}
+
+		if (filteredTemplates.length === 0) {
+			this.contentContainer.createEl('p', {
+				text: 'No timers match your filter.',
+				cls: 'lapse-buttons-empty'
+			});
+			return;
+		}
+
+		const groupResult = this.plugin.groupTemplateData(filteredTemplates);
+		await renderTemplateGroups(this.contentContainer, this.plugin, groupResult);
 	}
 }
 
@@ -5219,19 +5954,63 @@ class LapseSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Default template for calendar-created notes')
-			.setDesc('Template file path to use when creating new notes from the calendar (leave empty to use default format)')
+			.setName('Quick Start area key')
+			.setDesc('Frontmatter key for the gray text after • on template Quick Start cards (Timery-style), e.g. area or areaOfLife.')
 			.addText(text => text
-				.setPlaceholder('Templates/Lapse Buttons/Default')
-				.setValue(this.plugin.settings.calendarDefaultTemplate)
+				.setPlaceholder('area')
+				.setValue(this.plugin.settings.quickStartAreaKey)
 				.onChange(async (value) => {
-					this.plugin.settings.calendarDefaultTemplate = value;
+					this.plugin.settings.quickStartAreaKey = (value?.trim()) || 'area';
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Quick Start description key')
+			.setDesc('Frontmatter key for the bottom line on template cards. If empty in the note, the note file name is used. Also checks description if entry is missing.')
+			.addText(text => text
+				.setPlaceholder('entry')
+				.setValue(this.plugin.settings.quickStartEntryKey)
+				.onChange(async (value) => {
+					this.plugin.settings.quickStartEntryKey = (value?.trim()) || 'entry';
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Default project folder')
+			.setDesc('Optional. Each note (and subfolder) in this folder appears as an extra Quick Start timer. Tapping one starts a new timer note for that project with the clock running now.')
+			.addText(text => text
+				.setPlaceholder('Projects')
+				.setValue(this.plugin.settings.defaultProjectFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultProjectFolder = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Default save path for timer notes')
+			.setDesc('Vault path pattern for new timer notes. If it does not end in .md, the file name {{project}}-<timestamp>.md is appended. Use moment-style tokens: YYYY, MM, DD, HH, mm, ss, MMM, MMMM, ddd, dddd, plus {{project}} and {{title}}.')
+			.addText(text => text
+				.setPlaceholder('Lapse/{{YYYY}}/{{MM}}')
+				.setValue(this.plugin.settings.defaultTimerSavePath)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultTimerSavePath = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Default timer template')
+			.setDesc('Markdown file for project Quick Start and the calendar (when no per-button template). Only {{project}}, {{title}}, {{date}}, and {{now}} are substituted — the rest of the file is left as-is (safe for Templater). Leave empty for a minimal blank note: Lapse will add a running timer and sync frontmatter. If this path is set, Lapse will not rewrite that note’s YAML or inject timers.')
+			.addText(text => text
+				.setPlaceholder('Templates/Lapse/Default Timer.md')
+				.setValue(this.plugin.settings.defaultTimerTemplate)
+				.onChange(async (value) => {
+					this.plugin.settings.defaultTimerTemplate = value.trim();
 					await this.plugin.saveSettings();
 				}));
 
 		containerEl.createDiv({ cls: 'setting-item-description' })
-			.createEl('p', { 
-				text: 'Create buttons in notes using inline code: `lapse:TemplateName`. The button will create a new note from the template and open it.' 
+			.createEl('p', {
+				text: 'Inline code `lapse:TemplateName` and template Quick Start buttons create a new note from that template (saved using the path above) and open it in a new tab. Project Quick Start buttons start a running timer immediately.'
 			});
 
 		containerEl.createEl('h3', { text: 'Timer Controls' });
@@ -6824,52 +7603,57 @@ class LapseCalendarView extends ItemView {
 		// Prompt for label
 		const label = prompt('Enter label for new time entry:');
 		if (!label) return;
-		
-		// Get default template if configured
-		let templatePath: string | null = null;
-		if (this.plugin.settings.calendarDefaultTemplate) {
-			const templateFile = this.plugin.app.vault.getAbstractFileByPath(this.plugin.settings.calendarDefaultTemplate);
-			if (templateFile instanceof TFile) {
-				templatePath = templateFile.path;
-			}
+
+		const startDate = new Date(startTime);
+		const title = label;
+		const project = '';
+		let body: string;
+		let createdFromTemplateFile = false;
+		try {
+			body = await this.plugin.readAndApplyDefaultTimerTemplate({
+				project,
+				title,
+				date: startDate
+			});
+			createdFromTemplateFile = !!this.plugin.settings.defaultTimerTemplate?.trim();
+		} catch (e) {
+			console.error('Lapse calendar: default timer template failed', e);
+			const pk = this.plugin.settings.projectKey;
+			const ek = this.plugin.settings.entriesKey;
+			body = `---\n${pk}: ""\n${ek}: []\n---\n\n# ${label}\n`;
+			createdFromTemplateFile = false;
 		}
-		
-		// Create new note or use existing template
-		let file: TFile;
-		if (templatePath) {
-			// Use template
-			const templateFile = this.plugin.app.vault.getAbstractFileByPath(templatePath);
-			if (!templateFile || !(templateFile instanceof TFile)) {
-				throw new Error(`Template file not found: ${templatePath}`);
+
+		const rel = this.plugin.buildTimerNoteRelativePath(startDate, {
+			project: this.plugin.sanitizePathSegment(label),
+			title: this.plugin.sanitizePathSegment(label)
+		});
+		const file = await this.plugin.createTimerNoteFromContent(rel, body);
+
+		// Only merge the calendar slot via Lapse frontmatter rewrite for minimal notes. Template file
+		// content is left untouched so Templater / custom YAML stay valid.
+		const shouldInjectCalendarEntry = !createdFromTemplateFile;
+		if (shouldInjectCalendarEntry) {
+			await this.plugin.loadEntriesFromFrontmatter(file.path);
+			let pageData = this.plugin.timeData.get(file.path);
+			if (!pageData) {
+				pageData = { entries: [], totalTimeTracked: 0 };
+				this.plugin.timeData.set(file.path, pageData);
 			}
-			const templateContent = await this.plugin.app.vault.read(templateFile);
-			const newFileName = `${this.plugin.formatDateForFileName(new Date(startTime))}-${label.replace(/[^a-zA-Z0-9]/g, '-')}.md`;
-			const newFilePath = templatePath.split('/').slice(0, -1).join('/') + '/' + newFileName;
-			file = await this.plugin.app.vault.create(newFilePath, templateContent);
-		} else {
-			// Create new note with default name
-			const newFileName = `${this.plugin.formatDateForFileName(new Date(startTime))}-${label.replace(/[^a-zA-Z0-9]/g, '-')}.md`;
-			const defaultFolder = this.plugin.settings.lapseButtonTemplatesFolder.split('/')[0] || '';
-			const newFilePath = defaultFolder ? `${defaultFolder}/${newFileName}` : newFileName;
-			file = await this.plugin.app.vault.create(newFilePath, `---\n${this.plugin.settings.projectKey}: \n${this.plugin.settings.entriesKey}: []\n---\n\n# ${label}\n`);
+			const duration = endTime - startTime;
+			const entry: TimeEntry = {
+				id: `${file.path}-${pageData.entries.length}-${startTime}`,
+				label: label,
+				startTime: startTime,
+				endTime: endTime,
+				duration: duration,
+				isPaused: false,
+				tags: []
+			};
+			pageData.entries.push(entry);
+			await this.plugin.updateFrontmatter(file.path);
 		}
-		
-		// Add time entry
-		const duration = endTime - startTime;
-		const entry: TimeEntry = {
-			id: `entry-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-			label: label,
-			startTime: startTime,
-			endTime: endTime,
-			duration: duration,
-			isPaused: false,
-			tags: []
-		};
-		
-		const { entries } = await this.plugin.getCachedOrLoadEntries(file.path);
-		entries.push(entry);
-		await this.plugin.updateFrontmatter(file.path);
-		
+
 		await this.render();
 	}
 
